@@ -2,7 +2,7 @@
 
 Upload video → faster-whisper → Google ADK `LlmAgent` (DeepSeek via LiteLLM) → FFmpeg → 9:16 MP4.
 
-Captions are produced by an autonomous ADK agent with a `submit_caption_groups` tool, not a one-shot completion call. Set `LLM_API_KEY` in `.env`.
+Captions are produced by an autonomous ADK agent with tools (`get_words`, `submit_caption_groups`), not a one-shot completion call. Set `LLM_API_KEY` in `.env`.
 
 ## Setup
 
@@ -21,7 +21,7 @@ Set in `.env`:
 FFMPEG_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg
 FFPROBE_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffprobe
 MAX_VIDEO_DURATION_SEC=0
-CAPTION_CHUNK_SECONDS=0
+CAPTION_CHUNK_SECONDS=18
 ```
 
 `MAX_VIDEO_DURATION_SEC` is the upload length threshold in seconds. `0` means no limit. `CAPTION_CHUNK_SECONDS` is how long each caption-agent window is; `0` sends the whole transcript in one request (faster on DeepSeek, which has high per-request latency).

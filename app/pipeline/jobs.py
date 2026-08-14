@@ -11,7 +11,9 @@ class JobStatus(str, Enum):
     validating = "validating"
     extracting_audio = "extracting_audio"
     transcribing = "transcribing"
+    analyzing_editorial = "analyzing_editorial"
     generating_captions = "generating_captions"
+    planning_edits = "planning_edits"
     rendering = "rendering"
     completed = "completed"
     failed = "failed"
@@ -22,7 +24,9 @@ STAGE_PROGRESS = {
     JobStatus.validating: 10,
     JobStatus.extracting_audio: 25,
     JobStatus.transcribing: 45,
-    JobStatus.generating_captions: 70,
+    JobStatus.analyzing_editorial: 58,
+    JobStatus.generating_captions: 72,
+    JobStatus.planning_edits: 82,
     JobStatus.rendering: 90,
     JobStatus.completed: 100,
     JobStatus.failed: 100,
@@ -40,6 +44,8 @@ class Job:
     result_path: str | None = None
     transcript_path: str | None = None
     captions_path: str | None = None
+    editorial_path: str | None = None
+    edit_plan_path: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
 
     def set_stage(self, status: JobStatus) -> None:

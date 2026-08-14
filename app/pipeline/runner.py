@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 from app.captions.agent import CaptionAgentService
 from app.config import settings
+from app.editorial.decisions import EditorialIntelligenceEngine
+from app.editorial.framing import default_visual
 from app.media.audio import extract_audio
 from app.media.probe import probe_video, validate_video
-from app.pipeline.jobs import Job, JobStatus, job_store
+from app.pipeline.jobs import JobStatus, job_store
 from app.renderer.ffmpeg_renderer import FFmpegRenderer
 from app.transcription.faster_whisper_provider import FasterWhisperProvider
 
@@ -19,10 +20,12 @@ class Pipeline:
         stt: FasterWhisperProvider | None = None,
         caption_agent: CaptionAgentService | None = None,
         renderer: FFmpegRenderer | None = None,
+        editorial: EditorialIntelligenceEngine | None = None,
     ) -> None:
         self.stt = stt or FasterWhisperProvider()
         self.caption_agent = caption_agent or CaptionAgentService()
         self.renderer = renderer or FFmpegRenderer()
+        self.editorial = editorial or EditorialIntelligenceEngine()
 
     async def run(self, job_id: str) -> None:
         job = job_store.get(job_id)
@@ -33,7 +36,9 @@ class Pipeline:
         job_dir.mkdir(parents=True, exist_ok=True)
         audio_path = job_dir / "audio.wav"
         transcript_path = job_dir / "transcript.json"
+        editorial_path = job_dir / "editorial.json"
         captions_path = job_dir / "captions.json"
+        edit_plan_path = job_dir / "edit_plan.json"
         output_path = job_dir / "output.mp4"
 
         t0 = time.perf_counter()
@@ -60,6 +65,24 @@ class Pipeline:
             duration = info.duration
             if transcript.duration:
                 duration = min(duration, transcript.duration)
+            visual = default_visual()
+
+            job.set_stage(JobStatus.analyzing_editorial)
+            t_editorial = time.perf_counter()
+            analysis = await self.editorial.analyze(
+                transcript=transcript,
+                video_duration=duration,
+                job_id=job_id,
+                visual=visual,
+            )
+            job.metrics["editorial_time_ms"] = int(
+                (time.perf_counter() - t_editorial) * 1000
+            )
+            editorial_path.write_text(
+                analysis.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            job.editorial_path = str(editorial_path)
 
             job.set_stage(JobStatus.generating_captions)
             t_agent = time.perf_counter()
@@ -77,12 +100,27 @@ class Pipeline:
             )
             job.captions_path = str(captions_path)
 
+            job.set_stage(JobStatus.planning_edits)
+            edit_plan = await self.editorial.plan(
+                analysis,
+                timeline,
+                video_duration=duration,
+                visual=visual,
+            )
+            job.metrics["zoom_count"] = len(edit_plan.zooms)
+            edit_plan_path.write_text(
+                edit_plan.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            job.edit_plan_path = str(edit_plan_path)
+
             job.set_stage(JobStatus.rendering)
             t_render = time.perf_counter()
             self.renderer.render(
                 source_video=job.source_path,
                 caption_timeline=timeline,
                 output_path=str(output_path),
+                zooms=edit_plan.zooms,
             )
             job.metrics["render_time_ms"] = int(
                 (time.perf_counter() - t_render) * 1000
@@ -95,7 +133,6 @@ class Pipeline:
             job.metrics["stt_api_cost"] = 0
             job.set_stage(JobStatus.completed)
 
-            # cleanup extracted audio
             if audio_path.exists():
                 audio_path.unlink()
 

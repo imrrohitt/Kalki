@@ -5,9 +5,11 @@ from pathlib import Path
 
 from app.captions.models import CaptionTimeline
 from app.config import settings
+from app.editorial.models import ZoomDecision
 from app.media.probe import MediaError
 from app.renderer.ass import write_ass_file
 from app.renderer.filters import vertical_scale_crop_filter
+from app.renderer.zoom import build_zoom_filtergraph
 
 
 class FFmpegRenderer:
@@ -28,6 +30,7 @@ class FFmpegRenderer:
         source_video: str,
         caption_timeline: CaptionTimeline,
         output_path: str,
+        zooms: list[ZoomDecision] | None = None,
     ) -> str:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         font = Path(self.font_path)
@@ -64,37 +67,56 @@ class FFmpegRenderer:
             .replace(" ", "\\ ")
         )
 
-        vf = ",".join(
-            [
-                vertical_scale_crop_filter(self.width, self.height),
-                f"fps={self.fps}",
-                "format=yuv420p",
-                f"ass={ass_escaped}:fontsdir={fonts_dir}",
-            ]
+        finish = (
+            f"fps={self.fps},format=yuv420p,"
+            f"ass={ass_escaped}:fontsdir={fonts_dir}"
         )
+        zoom_graph = build_zoom_filtergraph(zooms, self.width, self.height, self.fps)
 
         cmd = [
             settings.ffmpeg_path,
             "-y",
             "-i",
             source_video,
-            "-vf",
-            vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "160k",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            output_path,
         ]
+        if zoom_graph:
+            cmd.extend(
+                [
+                    "-filter_complex",
+                    f"{zoom_graph};[vzoom]{finish}[vout]",
+                    "-map",
+                    "[vout]",
+                    "-map",
+                    "0:a?",
+                ]
+            )
+        else:
+            vf = ",".join(
+                [
+                    vertical_scale_crop_filter(self.width, self.height),
+                    finish,
+                ]
+            )
+            cmd.extend(["-vf", vf])
+
+        cmd.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
+                "-shortest",
+                output_path,
+            ]
+        )
 
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True)

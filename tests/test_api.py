@@ -115,6 +115,7 @@ def test_upload_job_status_and_result(tmp_path, monkeypatch):
         assert status is not None
         assert status["status"] == "completed", status
         assert status["progress"] == 100
+        assert "zoom_count" in status["metrics"]
 
         result = client.get(f"/api/v1/jobs/{job_id}/result")
         assert result.status_code == 200
