@@ -73,9 +73,10 @@ def probe_video(path: str) -> VideoInfo:
 def validate_video(info: VideoInfo, max_duration_sec: float) -> None:
     if info.duration <= 0:
         raise MediaError("Could not determine video duration.")
-    if info.duration > max_duration_sec:
+    if max_duration_sec > 0 and info.duration > max_duration_sec:
         raise MediaError(
-            f"Video too long ({info.duration:.1f}s). Max is {max_duration_sec:.0f}s."
+            f"Video too long ({info.duration:.1f}s). Max is {max_duration_sec:.0f}s "
+            "(set MAX_VIDEO_DURATION_SEC in .env; 0 means no limit)."
         )
     if not info.has_audio:
         raise MediaError("Video has no audio stream.")

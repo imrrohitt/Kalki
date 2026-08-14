@@ -1,7 +1,10 @@
+from types import SimpleNamespace
+
 import pytest
 
 from app.captions.models import Caption, CaptionTimeline, CaptionWord
 from app.captions.validation import CaptionValidationError, validate_caption_timeline
+from app.media.probe import MediaError, validate_video
 
 
 def test_valid_timeline():
@@ -63,3 +66,17 @@ def test_reject_caption_outside_duration():
     )
     with pytest.raises(CaptionValidationError):
         validate_caption_timeline(timeline, video_duration=1.0)
+
+
+def _info(duration: float) -> SimpleNamespace:
+    return SimpleNamespace(duration=duration, has_audio=True)
+
+
+def test_duration_threshold_from_env_seconds():
+    validate_video(_info(130.8), max_duration_sec=180)
+    validate_video(_info(400.0), max_duration_sec=0)
+
+
+def test_reject_video_over_duration_threshold():
+    with pytest.raises(MediaError, match="Max is 60s"):
+        validate_video(_info(90.0), max_duration_sec=60.0)

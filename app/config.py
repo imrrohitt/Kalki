@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     whisper_beam_size: int = 5
 
     caption_font_path: str = "assets/fonts/Montserrat-Bold.ttf"
-    max_video_duration_sec: float = 60.0
+    # Max source length in seconds. 0 disables the duration check.
+    max_video_duration_sec: float = 0.0
+    caption_chunk_seconds: float = 0.0
     output_width: int = 1080
     output_height: int = 1920
     output_fps: int = 30

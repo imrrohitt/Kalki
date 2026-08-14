@@ -1,38 +1,53 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
+import time
 from typing import Any
 
-from litellm import acompletion
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.adk.tools.tool_context import ToolContext
+from google.genai import types
 from pydantic import ValidationError
 
 from app.captions.models import CaptionTimeline
-from app.captions.validation import (
-    CaptionValidationError,
-    format_validation_error,
-    validate_caption_timeline,
-)
+from app.captions.validation import format_validation_error, validate_caption_timeline
 from app.config import settings
 from app.transcription.models import Transcript, Word
 
 
-CAPTION_INSTRUCTION = """You are a senior Reels caption editor.
+logger = logging.getLogger(__name__)
 
-Turn numbered transcript words into short, readable, professional captions.
+APP_NAME = "kalki_caption_app"
+USER_ID = "kalki_pipeline"
 
-RULES
-- Group by meaning, not by a fixed word count. Usually 2–4 words.
+CAPTION_INSTRUCTION = """You are CaptionAgent, an autonomous Reels caption editor.
+
+Complete the task yourself. Do not ask the user questions.
+
+Workflow:
+1. The user message already contains numbered transcript words.
+2. Group them into short, readable captions by meaning (usually 2-4 words).
+3. Call submit_caption_groups once with a JSON string of those groups.
+4. If the tool returns ok=false, fix the groups and submit again.
+5. After ok=true, reply DONE. Do not think out loud.
+
+Rules:
 - Keep phrases together: fine tuning, RAG system, AI interviews, domain data, LLM.
 - Break after a complete thought, a question, or a pause.
 - caption text: UPPERCASE, max 2 lines, use \\n for a line break.
-- Each line ~12–20 characters. No emojis, hashtags, or extra punctuation except ?.
+- Each line ~12-20 characters. No emojis, hashtags, or extra punctuation except ?.
 - Lightly clean Hinglish grammar in the display text only.
-- emphasis: 0 or 1 word index per caption (the payload word: RAG, LLM, AI, TUNING, DATA).
-- Return ONLY JSON. No markdown.
+- emphasis_id: 0 or 1 word id per caption (payload words: RAG, LLM, AI, TUNING, DATA).
+- ids must be consecutive, cover every word in order, no duplicates, no skips.
 
-OUTPUT
+submit_caption_groups JSON:
 {
   "captions": [
     {
@@ -43,8 +58,6 @@ OUTPUT
     }
   ]
 }
-
-ids must be consecutive, cover every word in order, no duplicates, no skips.
 """
 
 
@@ -98,7 +111,7 @@ def _chunk_words(words: list[Word], chunk_seconds: float = 18.0) -> list[tuple[i
 def _captions_from_ids(
     groups: list[dict[str, Any]],
     source_words: list[Word],
-    offset: int,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     captions: list[dict[str, Any]] = []
     cursor = 0
@@ -113,7 +126,6 @@ def _captions_from_ids(
         if not ids:
             continue
         ids = sorted(set(ids))
-        # Fill gaps so no source word is dropped.
         lo, hi = ids[0], ids[-1]
         if lo < cursor:
             lo = cursor
@@ -127,7 +139,7 @@ def _captions_from_ids(
             continue
         emphasis_id = group.get("emphasis_id")
         try:
-            emphasis_local = int(emphasis_id) if emphasis_id is not None else None
+            emphasis_local = int(emphasis_id) + offset if emphasis_id is not None else None
         except (TypeError, ValueError):
             emphasis_local = None
         text = str(group.get("text") or " ".join(w.word.upper() for w in group_words))
@@ -169,6 +181,34 @@ def _captions_from_ids(
     return captions
 
 
+def _parse_caption_groups(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, str):
+        payload = _extract_json(payload)
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        groups = payload.get("captions") or []
+        if isinstance(groups, list):
+            return groups
+    raise ValueError("expected captions array or {captions: [...]}")
+
+
+def _is_deepseek_model(model: str) -> bool:
+    return "deepseek" in (model or "").lower()
+
+
+def _lite_llm_model(model: str) -> str:
+    # openai/deepseek-* uses the OpenAI transformer, which drops `thinking`.
+    # deepseek/* keeps the DeepSeek transformer so thinking can be disabled.
+    if _is_deepseek_model(model) and model.lower().startswith("openai/"):
+        return "deepseek/" + model.split("/", 1)[1]
+    return model
+
+
+def _deepseek_no_think_body() -> dict[str, Any]:
+    return {"thinking": {"type": "disabled"}}
+
+
 class CaptionAgentService:
     def __init__(self) -> None:
         self.api_key = settings.llm_api_key.replace("Bearer ", "").strip()
@@ -176,41 +216,80 @@ class CaptionAgentService:
         self.model = settings.llm_model
         if self.api_key:
             os.environ.setdefault("DEEPSEEK_API_KEY", self.api_key)
-
-    async def _complete(self, user_prompt: str) -> str:
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": CAPTION_INSTRUCTION},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 1200,
-            "timeout": 45,
-            "drop_params": True,
-            # DeepSeek v4 thinks by default; that is why this was so slow.
-            "extra_body": {
-                "thinking": {"type": "disabled"},
-                "reasoning_effort": "low",
-            },
+            os.environ.setdefault("OPENAI_API_KEY", self.api_key)
+        lite_kwargs: dict[str, Any] = {
+            "model": _lite_llm_model(self.model),
+            "api_key": self.api_key or None,
+            "api_base": self.api_base,
+            "timeout": 90,
+            "drop_params": not _is_deepseek_model(self.model),
         }
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        if self.api_base:
-            kwargs["api_base"] = self.api_base
+        if _is_deepseek_model(self.model):
+            # V4 thinks by default. Never send reasoning_effort — that turns thinking back on.
+            lite_kwargs["thinking"] = {"type": "disabled"}
+            lite_kwargs["extra_body"] = _deepseek_no_think_body()
+        self._lite_llm = LiteLlm(**lite_kwargs)
 
-        response = await acompletion(**kwargs)
-        text = response.choices[0].message.content or ""
-        if not str(text).strip():
-            raise ValueError("Caption LLM returned empty response")
-        return str(text)
+    def _build_agent(self, tools: list[Any]) -> LlmAgent:
+        http_options = None
+        if _is_deepseek_model(self.model):
+            http_options = types.HttpOptions(
+                extra_body=_deepseek_no_think_body(),
+                timeout=90_000,
+            )
+        return LlmAgent(
+            name="caption_agent",
+            model=self._lite_llm,
+            description="Groups transcript words into short vertical-video captions.",
+            instruction=CAPTION_INSTRUCTION,
+            tools=tools,
+            generate_content_config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=8000,
+                http_options=http_options,
+            ),
+        )
+
+    async def _run_agent(
+        self,
+        agent: LlmAgent,
+        prompt: str,
+        session_id: str,
+    ) -> str:
+        session_service = InMemorySessionService()
+        await session_service.create_session(
+            app_name=APP_NAME,
+            user_id=USER_ID,
+            session_id=session_id,
+        )
+        runner = Runner(
+            agent=agent,
+            app_name=APP_NAME,
+            session_service=session_service,
+        )
+        content = types.Content(role="user", parts=[types.Part(text=prompt)])
+        texts: list[str] = []
+        async for event in runner.run_async(
+            user_id=USER_ID,
+            session_id=session_id,
+            new_message=content,
+        ):
+            if not event.is_final_response() or not event.content or not event.content.parts:
+                continue
+            for part in event.content.parts:
+                if part.text and part.text.strip():
+                    texts.append(part.text.strip())
+        return "\n".join(texts)
 
     async def _generate_chunk(
         self,
         words: list[Word],
         offset: int,
         video_duration: float,
+        job_id: str,
+        chunk_index: int,
     ) -> list[dict[str, Any]]:
+        state: dict[str, Any] = {"accepted": False, "captions": None}
         payload = {
             "offset": offset,
             "duration": round(video_duration, 2),
@@ -224,23 +303,60 @@ class CaptionAgentService:
                 for i, w in enumerate(words)
             ],
         }
+
+        def submit_caption_groups(
+            captions_json: str,
+            tool_context: ToolContext,
+        ) -> dict[str, Any]:
+            """Submit finished caption groups as a JSON string.
+
+            Expected shape:
+            {"captions": [{"ids": [0, 1], "text": "HELLO\\nWORLD", "emphasis_id": 0, "position": "bottom_center"}]}
+
+            ids are 0-based inside THIS word list, consecutive, covering every word.
+            """
+            try:
+                groups = _parse_caption_groups(captions_json)
+                if not groups:
+                    raise ValueError("no captions in payload")
+                captions = _captions_from_ids(groups, words, offset=0)
+            except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
+                state["accepted"] = False
+                return {"ok": False, "error": format_validation_error(exc)}
+            state["captions"] = captions
+            state["accepted"] = True
+            # Stop ADK from making a second "DONE" LLM call after the tool.
+            tool_context.actions.skip_summarization = True
+            tool_context.get_invocation_context().end_invocation = True
+            return {"ok": True, "caption_count": len(captions)}
+
+        agent = self._build_agent([submit_caption_groups])
         prompt = (
-            "Group these words into captions. ids are 0-based inside THIS list.\n"
-            "Return compact JSON only.\n\n"
+            "Caption this transcript chunk. Cover every word. "
+            "Call submit_caption_groups once with JSON. Do not wait for more input.\n\n"
             + json.dumps(payload, ensure_ascii=False)
         )
-        last_error: Exception | None = None
-        for _ in range(2):
+        final_text = await self._run_agent(
+            agent,
+            prompt,
+            session_id=f"{job_id}-c{chunk_index}",
+        )
+
+        if state["accepted"] and state["captions"]:
+            return state["captions"]
+
+        if final_text.strip():
             try:
-                data = _extract_json(await self._complete(prompt))
-                groups = data.get("captions") or []
-                if not isinstance(groups, list) or not groups:
-                    raise ValueError("LLM returned no captions")
-                return _captions_from_ids(groups, words, offset=0)
-            except (json.JSONDecodeError, ValidationError, ValueError, KeyError) as exc:
-                last_error = exc
-                prompt += f"\n\nFix this error and return JSON only: {last_error}"
-        raise RuntimeError(f"Caption chunk failed: {format_validation_error(last_error)}")
+                groups = _parse_caption_groups(final_text)
+                if groups:
+                    return _captions_from_ids(groups, words, offset=0)
+            except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
+                pass
+
+        raise RuntimeError(
+            "Caption agent did not submit valid groups"
+            + (f": {final_text[:300]}" if final_text else "")
+        )
 
     async def generate(
         self,
@@ -248,18 +364,45 @@ class CaptionAgentService:
         video_duration: float,
         job_id: str,
     ) -> CaptionTimeline:
-        _ = job_id
         source_words = _flatten_words(transcript)
         if not source_words:
             raise RuntimeError("No words in transcript for caption generation")
 
+        chunk_seconds = settings.caption_chunk_seconds
+        if chunk_seconds <= 0:
+            chunks = [(0, source_words)]
+        else:
+            chunks = _chunk_words(source_words, chunk_seconds=chunk_seconds)
+        logger.info("caption agent: %s words in %s chunks", len(source_words), len(chunks))
+        sem = asyncio.Semaphore(3)
+
+        async def run_one(
+            index: int, offset: int, chunk: list[Word]
+        ) -> tuple[int, list[dict[str, Any]]]:
+            async with sem:
+                t0 = time.perf_counter()
+                captions = await self._generate_chunk(
+                    words=chunk,
+                    offset=offset,
+                    video_duration=video_duration,
+                    job_id=job_id,
+                    chunk_index=index,
+                )
+                logger.info(
+                    "caption chunk %s/%s: %s words in %.1fs",
+                    index + 1,
+                    len(chunks),
+                    len(chunk),
+                    time.perf_counter() - t0,
+                )
+                return index, captions
+
+        parts = await asyncio.gather(
+            *[run_one(i, offset, chunk) for i, (offset, chunk) in enumerate(chunks)]
+        )
         all_captions: list[dict[str, Any]] = []
-        for offset, chunk in _chunk_words(source_words, chunk_seconds=18.0):
-            # Rebuild captions against the global word list after local grouping.
-            local = await self._generate_chunk(chunk, offset, video_duration)
-            for cap in local:
-                # Map local words back by matching timestamps already on chunk words.
-                all_captions.append(cap)
+        for _, captions in sorted(parts, key=lambda item: item[0]):
+            all_captions.extend(captions)
 
         data = {"version": "1.0", "style": "dynamic_social", "captions": all_captions}
         return validate_caption_timeline(data, video_duration)
