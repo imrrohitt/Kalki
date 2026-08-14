@@ -1,0 +1,11 @@
+faster-whisper>=1.2.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart
+pydantic>=2
+pydantic-settings>=2
+python-dotenv
+google-adk[extensions]
+litellm>=1.84
+pytest>=8
+httpx>=0.27
