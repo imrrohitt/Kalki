@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import asyncio
 import json
+import os
 import re
 from typing import Any
 
-from google.adk.agents import LlmAgent
-from google.adk.models.lite_llm import LiteLlm
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
-from litellm.exceptions import RateLimitError
+from litellm import acompletion
 from pydantic import ValidationError
 
-from app.captions.models import Caption, CaptionTimeline, CaptionWord
+from app.captions.models import CaptionTimeline
 from app.captions.validation import (
     CaptionValidationError,
     format_validation_error,
@@ -23,47 +18,38 @@ from app.config import settings
 from app.transcription.models import Transcript, Word
 
 
-CAPTION_INSTRUCTION = """You are CaptionAgent for short-form vertical social videos.
+CAPTION_INSTRUCTION = """You are a senior Reels caption editor.
 
-Convert word-level transcript words into caption groups.
+Turn numbered transcript words into short, readable, professional captions.
 
-Rules:
-- Use ONLY provided word timestamps. Never invent or change timestamps.
-- Group 2-5 words per caption when natural.
-- Prefer semantic phrase breaks.
-- Avoid awkward breaks and captions shorter than 0.2s.
-- style=dynamic_social, position=bottom_center, animation=pop
-- Mark important nouns/verbs with emphasis=true
-- Each word object must use key "text" (not "word")
-- word.end must be > word.start
-- Return ONLY raw JSON (no markdown, no tools) with shape:
+RULES
+- Group by meaning, not by a fixed word count. Usually 2–4 words.
+- Keep phrases together: fine tuning, RAG system, AI interviews, domain data, LLM.
+- Break after a complete thought, a question, or a pause.
+- caption text: UPPERCASE, max 2 lines, use \\n for a line break.
+- Each line ~12–20 characters. No emojis, hashtags, or extra punctuation except ?.
+- Lightly clean Hinglish grammar in the display text only.
+- emphasis: 0 or 1 word index per caption (the payload word: RAG, LLM, AI, TUNING, DATA).
+- Return ONLY JSON. No markdown.
+
+OUTPUT
 {
-  "version": "1.0",
-  "style": "dynamic_social",
   "captions": [
     {
-      "start": 0.2,
-      "end": 1.4,
-      "text": "AI IS",
-      "position": "bottom_center",
-      "animation": "pop",
-      "words": [
-        {"text": "AI", "start": 0.2, "end": 0.55, "emphasis": true},
-        {"text": "IS", "start": 0.55, "end": 0.8, "emphasis": false}
-      ]
+      "ids": [0, 1, 2],
+      "text": "IF YOU ARE\\nGIVING",
+      "emphasis_id": 2,
+      "position": "bottom_center"
     }
   ]
 }
+
+ids must be consecutive, cover every word in order, no duplicates, no skips.
 """
 
 
 def _extract_json(text: str) -> dict[str, Any]:
-    text = text.strip()
-    # Groq sometimes wraps tool-like junk; try to recover JSON object.
-    if "<function" in text:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            text = match.group(0)
+    text = (text or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -76,247 +62,185 @@ def _extract_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def _normalize_timeline_dict(data: dict[str, Any]) -> dict[str, Any]:
-    captions = []
-    for cap in data.get("captions", []):
-        words_in = cap.get("words") or []
-        words_out = []
-        for w in words_in:
-            text = str(w.get("text") or w.get("word") or "").strip()
-            if not text:
-                continue
-            start = float(w.get("start", 0))
-            end = float(w.get("end", start))
-            if end <= start:
-                end = start + 0.08
-            words_out.append(
-                {
-                    "text": text,
-                    "start": start,
-                    "end": end,
-                    "emphasis": bool(w.get("emphasis", False)),
-                }
-            )
-        if not words_out:
-            continue
-        start = float(cap.get("start", words_out[0]["start"]))
-        end = float(cap.get("end", words_out[-1]["end"]))
-        if end <= start:
-            end = start + 0.2
-        # Clamp caption bounds to word bounds for consistency.
-        start = min(start, words_out[0]["start"])
-        end = max(end, words_out[-1]["end"])
-        text = str(cap.get("text") or " ".join(x["text"] for x in words_out)).strip()
-        captions.append(
-            {
-                "start": start,
-                "end": end,
-                "text": text,
-                "position": cap.get("position") or "bottom_center",
-                "animation": cap.get("animation") or "pop",
-                "words": words_out,
-            }
-        )
-    return {
-        "version": data.get("version") or "1.0",
-        "style": data.get("style") or "dynamic_social",
-        "captions": captions,
-    }
-
-
 def _flatten_words(transcript: Transcript) -> list[Word]:
     words: list[Word] = []
     for seg in transcript.segments:
         for w in seg.words:
-            if w.word.strip():
-                words.append(w)
+            token = w.word.strip()
+            if not token:
+                continue
+            end = float(w.end) if w.end > w.start else float(w.start) + 0.08
+            words.append(Word(word=token, start=float(w.start), end=end, probability=w.probability))
     return words
 
 
-def _chunk_words(words: list[Word], chunk_seconds: float = 12.0) -> list[list[Word]]:
-    if not words:
-        return []
-    chunks: list[list[Word]] = []
+def _chunk_words(words: list[Word], chunk_seconds: float = 18.0) -> list[tuple[int, list[Word]]]:
+    chunks: list[tuple[int, list[Word]]] = []
+    start_idx = 0
     current: list[Word] = []
-    chunk_start = words[0].start
-    for w in words:
-        if current and (w.start - chunk_start) >= chunk_seconds:
-            chunks.append(current)
+    chunk_t0 = words[0].start if words else 0.0
+    for i, w in enumerate(words):
+        if current and (w.start - chunk_t0) >= chunk_seconds:
+            chunks.append((start_idx, current))
+            start_idx = i
             current = [w]
-            chunk_start = w.start
+            chunk_t0 = w.start
         else:
+            if not current:
+                start_idx = i
+                chunk_t0 = w.start
             current.append(w)
     if current:
-        chunks.append(current)
+        chunks.append((start_idx, current))
     return chunks
 
 
-def _heuristic_captions(words: list[Word]) -> list[Caption]:
-    """Deterministic 2-4 word grouping using Whisper timestamps only."""
-    captions: list[Caption] = []
-    i = 0
-    emphasis_words = {
-        "ai",
-        "llm",
-        "rag",
-        "raka",
-        "fine",
-        "tuning",
-        "data",
-        "model",
-        "train",
-        "domain",
-    }
-    while i < len(words):
-        size = 3
-        # Prefer ending on punctuation-ish or pause.
-        if i + 1 < len(words) and (words[i + 1].start - words[i].end) > 0.35:
-            size = 1
-        elif i + 2 < len(words) and (words[i + 2].start - words[i + 1].end) > 0.35:
-            size = 2
-        elif i + 4 <= len(words):
-            size = 4 if (words[i + 3].end - words[i].start) < 1.8 else 3
-        else:
-            size = min(3, len(words) - i)
-
-        group = words[i : i + size]
-        cap_words = []
-        for w in group:
-            start = float(w.start)
-            end = float(w.end)
-            if end <= start:
-                end = start + 0.08
-            text = w.word.strip()
-            cap_words.append(
-                CaptionWord(
-                    text=text,
-                    start=start,
-                    end=end,
-                    emphasis=text.lower().strip(".,!?") in emphasis_words,
-                )
-            )
-        start = cap_words[0].start
-        end = max(cap_words[-1].end, start + 0.2)
+def _captions_from_ids(
+    groups: list[dict[str, Any]],
+    source_words: list[Word],
+    offset: int,
+) -> list[dict[str, Any]]:
+    captions: list[dict[str, Any]] = []
+    cursor = 0
+    for group in groups:
+        raw_ids = group.get("ids") or []
+        ids = []
+        for item in raw_ids:
+            try:
+                ids.append(int(item) + offset)
+            except (TypeError, ValueError):
+                continue
+        if not ids:
+            continue
+        ids = sorted(set(ids))
+        # Fill gaps so no source word is dropped.
+        lo, hi = ids[0], ids[-1]
+        if lo < cursor:
+            lo = cursor
+        if lo > cursor:
+            lo = cursor
+        hi = max(hi, lo)
+        used = list(range(lo, hi + 1))
+        cursor = hi + 1
+        group_words = [source_words[i] for i in used if 0 <= i < len(source_words)]
+        if not group_words:
+            continue
+        emphasis_id = group.get("emphasis_id")
+        try:
+            emphasis_local = int(emphasis_id) if emphasis_id is not None else None
+        except (TypeError, ValueError):
+            emphasis_local = None
+        text = str(group.get("text") or " ".join(w.word.upper() for w in group_words))
         captions.append(
-            Caption(
-                start=start,
-                end=end,
-                text=" ".join(w.text for w in cap_words).upper(),
-                position="bottom_center",
-                animation="pop",
-                words=cap_words,
-            )
+            {
+                "start": group_words[0].start,
+                "end": max(group_words[-1].end, group_words[0].start + 0.25),
+                "text": text.replace("\\n", "\n").strip(),
+                "position": group.get("position") or "bottom_center",
+                "animation": "pop",
+                "words": [
+                    {
+                        "text": w.word,
+                        "start": w.start,
+                        "end": w.end,
+                        "emphasis": used[local_i] == emphasis_local
+                        if emphasis_local is not None
+                        else False,
+                    }
+                    for local_i, w in enumerate(group_words)
+                ],
+            }
         )
-        i += size
+    if cursor < len(source_words):
+        leftover = source_words[cursor:]
+        captions.append(
+            {
+                "start": leftover[0].start,
+                "end": leftover[-1].end,
+                "text": " ".join(w.word.upper() for w in leftover),
+                "position": "bottom_center",
+                "animation": "pop",
+                "words": [
+                    {"text": w.word, "start": w.start, "end": w.end, "emphasis": False}
+                    for w in leftover
+                ],
+            }
+        )
     return captions
 
 
 class CaptionAgentService:
     def __init__(self) -> None:
-        kwargs: dict[str, Any] = {}
-        if settings.llm_api_key:
-            kwargs["api_key"] = settings.llm_api_key
-        if settings.llm_base_url:
-            kwargs["api_base"] = settings.llm_base_url
+        self.api_key = settings.llm_api_key.replace("Bearer ", "").strip()
+        self.api_base = (settings.llm_base_url or "").rstrip("/") or None
+        self.model = settings.llm_model
+        if self.api_key:
+            os.environ.setdefault("DEEPSEEK_API_KEY", self.api_key)
 
-        if settings.llm_api_key and settings.llm_model.startswith("groq/"):
-            import os
+    async def _complete(self, user_prompt: str) -> str:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": CAPTION_INSTRUCTION},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 1200,
+            "timeout": 45,
+            "drop_params": True,
+            # DeepSeek v4 thinks by default; that is why this was so slow.
+            "extra_body": {
+                "thinking": {"type": "disabled"},
+                "reasoning_effort": "low",
+            },
+        }
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
 
-            os.environ.setdefault("GROQ_API_KEY", settings.llm_api_key)
-
-        # Avoid ADK output_schema/tool calling — small local models + Groq
-        # handle plain JSON text more reliably than tool schemas.
-        self.agent = LlmAgent(
-            name="caption_agent",
-            model=LiteLlm(model=settings.llm_model, **kwargs),
-            description="Builds dynamic social caption timelines from word timestamps.",
-            instruction=CAPTION_INSTRUCTION,
-        )
-        self.session_service = InMemorySessionService()
-        self.runner = Runner(
-            agent=self.agent,
-            app_name="reel_editor",
-            session_service=self.session_service,
-        )
-
-    async def _run_once(self, prompt: str, session_id: str) -> str:
-        content = types.Content(role="user", parts=[types.Part(text=prompt)])
-
-        last_error: Exception | None = None
-        for attempt in range(5):
-            sid = session_id if attempt == 0 else f"{session_id}-r{attempt}"
-            await self.session_service.create_session(
-                app_name="reel_editor",
-                user_id="pipeline",
-                session_id=sid,
-            )
-            try:
-                final_text = ""
-                async for event in self.runner.run_async(
-                    user_id="pipeline",
-                    session_id=sid,
-                    new_message=content,
-                ):
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                final_text += part.text
-                if not final_text.strip():
-                    raise ValueError("Caption agent returned empty response")
-                return final_text
-            except RateLimitError as exc:
-                last_error = exc
-                await asyncio.sleep(8 + attempt * 4)
-            except Exception as exc:  # noqa: BLE001
-                msg = str(exc)
-                if "RateLimitError" in msg or "rate_limit_exceeded" in msg:
-                    last_error = exc
-                    await asyncio.sleep(8 + attempt * 4)
-                    continue
-                raise
-
-        raise RuntimeError(f"Caption agent rate-limited: {last_error}")
+        response = await acompletion(**kwargs)
+        text = response.choices[0].message.content or ""
+        if not str(text).strip():
+            raise ValueError("Caption LLM returned empty response")
+        return str(text)
 
     async def _generate_chunk(
         self,
         words: list[Word],
+        offset: int,
         video_duration: float,
-        language: str | None,
-        job_id: str,
-        chunk_index: int,
-    ) -> list[Caption]:
-        prompt = (
-            "Create CaptionTimeline JSON for ONLY these words.\n"
-            "Keep 2-5 words per caption.\n"
-            "Return ONLY JSON. No markdown.\n\n"
-            + json.dumps(
+    ) -> list[dict[str, Any]]:
+        payload = {
+            "offset": offset,
+            "duration": round(video_duration, 2),
+            "words": [
                 {
-                    "duration": video_duration,
-                    "language": language,
-                    "words": [
-                        {"text": w.word, "start": round(w.start, 2), "end": round(w.end, 2)}
-                        for w in words
-                    ],
-                },
-                ensure_ascii=False,
-            )
+                    "id": i,
+                    "text": w.word,
+                    "start": round(w.start, 2),
+                    "end": round(w.end, 2),
+                }
+                for i, w in enumerate(words)
+            ],
+        }
+        prompt = (
+            "Group these words into captions. ids are 0-based inside THIS list.\n"
+            "Return compact JSON only.\n\n"
+            + json.dumps(payload, ensure_ascii=False)
         )
-
         last_error: Exception | None = None
-        for attempt in range(1):
+        for _ in range(2):
             try:
-                raw = await self._run_once(
-                    prompt,
-                    session_id=f"{job_id}-c{chunk_index}-a{attempt}",
-                )
-                data = _normalize_timeline_dict(_extract_json(raw))
-                timeline = validate_caption_timeline(data, video_duration)
-                return timeline.captions
-            except Exception as exc:  # noqa: BLE001 - fall back for tiny local models
+                data = _extract_json(await self._complete(prompt))
+                groups = data.get("captions") or []
+                if not isinstance(groups, list) or not groups:
+                    raise ValueError("LLM returned no captions")
+                return _captions_from_ids(groups, words, offset=0)
+            except (json.JSONDecodeError, ValidationError, ValueError, KeyError) as exc:
                 last_error = exc
-
-        _ = last_error
-        return _heuristic_captions(words)
+                prompt += f"\n\nFix this error and return JSON only: {last_error}"
+        raise RuntimeError(f"Caption chunk failed: {format_validation_error(last_error)}")
 
     async def generate(
         self,
@@ -324,32 +248,18 @@ class CaptionAgentService:
         video_duration: float,
         job_id: str,
     ) -> CaptionTimeline:
-        words = _flatten_words(transcript)
-        if not words:
+        _ = job_id
+        source_words = _flatten_words(transcript)
+        if not source_words:
             raise RuntimeError("No words in transcript for caption generation")
 
-        chunks = _chunk_words(words, chunk_seconds=12.0)
-        all_captions: list[Caption] = []
-        use_local = settings.llm_model.startswith("ollama/")
-        for index, chunk in enumerate(chunks):
-            if index > 0 and settings.llm_model.startswith("groq/"):
-                await asyncio.sleep(6)
-            if use_local:
-                # gemma:2b is unreliable for full JSON timelines; keep Whisper timing.
-                caps = _heuristic_captions(chunk)
-            else:
-                caps = await self._generate_chunk(
-                    words=chunk,
-                    video_duration=video_duration,
-                    language=transcript.language,
-                    job_id=job_id,
-                    chunk_index=index,
-                )
-            all_captions.extend(caps)
+        all_captions: list[dict[str, Any]] = []
+        for offset, chunk in _chunk_words(source_words, chunk_seconds=18.0):
+            # Rebuild captions against the global word list after local grouping.
+            local = await self._generate_chunk(chunk, offset, video_duration)
+            for cap in local:
+                # Map local words back by matching timestamps already on chunk words.
+                all_captions.append(cap)
 
-        timeline = CaptionTimeline(
-            version="1.0",
-            style="dynamic_social",
-            captions=all_captions,
-        )
-        return validate_caption_timeline(timeline, video_duration)
+        data = {"version": "1.0", "style": "dynamic_social", "captions": all_captions}
+        return validate_caption_timeline(data, video_duration)

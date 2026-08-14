@@ -2,6 +2,8 @@
 
 Upload video → faster-whisper → ADK Caption Agent (Groq via LiteLLM) → FFmpeg → 9:16 MP4.
 
+LLM is DeepSeek (`openai/deepseek-v4-flash`) through LiteLLM / Google ADK. Set `LLM_API_KEY` in `.env`.
+
 ## Setup
 
 ```bash

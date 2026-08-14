@@ -22,59 +22,49 @@ def _escape_ass(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-def _split_two_lines(words: list[str], max_chars: int = 16) -> tuple[list[str], list[str]]:
-    line1: list[str] = []
-    line2: list[str] = []
-    for word in words:
-        candidate = (" ".join(line1 + [word])).strip()
-        if not line2 and (not line1 or len(candidate) <= max_chars):
-            line1.append(word)
-        else:
-            line2.append(word)
-    return line1, line2
+def _lines_from_caption(caption: Caption) -> list[str]:
+    display = (caption.text or "").replace("\\n", "\n").strip()
+    if "\n" in display:
+        parts = [p.strip() for p in display.split("\n") if p.strip()]
+        return parts[:2]
+    words = display.upper().split()
+    if not words:
+        words = [w.text.upper() for w in caption.words]
+    if len(" ".join(words)) <= 18 or len(words) <= 3:
+        return [" ".join(words)]
+    # Balanced two-line wrap for longer phrases.
+    mid = max(1, (len(words) + 1) // 2)
+    return [" ".join(words[:mid]), " ".join(words[mid:])]
 
 
-def _karaoke_line(words: list[CaptionWord], start_offset: float) -> str:
-    """Active word pops yellow; upcoming words stay white."""
-    parts: list[str] = []
-    for index, word in enumerate(words):
-        token = _escape_ass(word.text.upper())
-        # Duration of this word highlight in centiseconds.
-        dur = max(int(round((word.end - word.start) * 100)), 8)
-        # {\k} advances karaoke; {\kf} fill. Use highlight swap via \1c.
-        if word.emphasis or index == 0:
-            # Emphasized / lead words get stronger treatment.
-            parts.append(rf"{{\k{dur}\1c&H0000FFFF&}}{token}{{\1c&H00FFFFFF&}}")
+def _emphasis_set(caption: Caption) -> set[str]:
+    return {
+        w.text.upper().strip(".,!?")
+        for w in caption.words
+        if w.emphasis
+    }
+
+
+def _style_line(line: str, hot: set[str]) -> str:
+    parts = []
+    for token in line.upper().split():
+        clean = token.strip(".,!?")
+        safe = _escape_ass(token)
+        if clean in hot:
+            parts.append(rf"{{\c&H0000FFFF&\b1}}{safe}{{\c&H00FFFFFF&\b0}}")
         else:
-            parts.append(rf"{{\k{dur}}}{token}")
-        if index < len(words) - 1:
-            parts.append(" ")
-    return "".join(parts)
+            parts.append(safe)
+    return " ".join(parts)
 
 
 def _styled_caption_text(caption: Caption) -> str:
-    words = list(caption.words or [])
-    if words:
-        plain = [w.text.upper() for w in words]
-        line1_words, line2_words = _split_two_lines(plain, max_chars=16)
-        n1 = len(line1_words)
-        w1, w2 = words[:n1], words[n1:]
-        body = _karaoke_line(w1, caption.start)
-        if w2:
-            body += r"\N" + _karaoke_line(w2, caption.start)
-    else:
-        plain = _escape_ass(caption.text.upper()).split()
-        line1, line2 = _split_two_lines(plain, max_chars=16)
-        body = " ".join(line1)
-        if line2:
-            body += r"\N" + " ".join(line2)
-
-    # Strong pop + soft fade — visible social-caption motion.
+    hot = _emphasis_set(caption)
+    lines = _lines_from_caption(caption)
+    body = r"\N".join(_style_line(line, hot) for line in lines)
     anim = (
-        r"{\fad(70,90)"
-        r"\t(0,120,\fscx145\fscy145)"
-        r"\t(120,240,\fscx100\fscy100)"
-        r"\bord8\shad3}"
+        r"{\fad(80,90)"
+        r"\t(0,130,\fscx128\fscy128)"
+        r"\t(130,230,\fscx100\fscy100)}"
     )
     return anim + body
 
@@ -84,7 +74,7 @@ def _dedupe_overlaps(captions: list[Caption]) -> list[Caption]:
     fixed: list[Caption] = []
     last_end = -1.0
     for cap in ordered:
-        start = max(float(cap.start), last_end + 0.05)
+        start = max(float(cap.start), last_end + 0.04)
         end = float(cap.end)
         if end - start < 0.22:
             end = start + 0.22
@@ -125,13 +115,10 @@ def write_ass_file(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Outline+shadow style (no harsh opaque box). Broader social look.
-    # Fontsize 112, Spacing 3, Outline 7, Shadow 3, Alignment 2 bottom-center.
-    # MarginV 300 keeps captions lower-third and away from chin a bit.
     style = (
-        f"Style: Default,{font_name},112,"
-        f"&H00FFFFFF,&H0000FFFF,&H00000000,&H64000000,"
-        f"-1,0,0,0,100,100,3,0,1,7,3,2,90,90,300,1"
+        f"Style: Default,{font_name},96,"
+        f"&H00FFFFFF,&H0000FFFF,&H00101010,&H80000000,"
+        f"-1,0,0,0,100,100,1.6,0,1,6,2,2,80,80,280,1"
     )
 
     lines = [
