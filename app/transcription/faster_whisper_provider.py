@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from faster_whisper import WhisperModel
 
 from app.config import settings
 from app.transcription.models import Segment, Transcript, Word
+
+logger = logging.getLogger(__name__)
 
 
 class FasterWhisperProvider:
@@ -22,11 +25,18 @@ class FasterWhisperProvider:
 
     def _get_model(self) -> WhisperModel:
         if self._model is None:
+            logger.info(
+                "loading whisper model=%s device=%s compute=%s",
+                self.model_size,
+                self.device,
+                self.compute_type,
+            )
             self._model = WhisperModel(
                 self.model_size,
                 device=self.device,
                 compute_type=self.compute_type,
             )
+            logger.info("whisper model ready")
         return self._model
 
     def _transcribe_sync(self, audio_path: str) -> Transcript:

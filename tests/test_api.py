@@ -89,7 +89,10 @@ def test_upload_job_status_and_result(tmp_path, monkeypatch):
     routes._pipeline = Pipeline(
         stt=stt,
         caption_agent=agent,
-        renderer=FFmpegRenderer(font_path=str(test_settings.font_path)),
+        renderer=FFmpegRenderer(
+            font_path=str(test_settings.font_path),
+            split_layout=True,
+        ),
     )
 
     app = create_app()

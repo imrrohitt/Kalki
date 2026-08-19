@@ -2,9 +2,11 @@ from fastapi import FastAPI
 
 from app.api.routes import router
 from app.config import settings
+from app.logging_setup import configure_logging
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     settings.storage_path.mkdir(parents=True, exist_ok=True)
     (settings.storage_path / "uploads").mkdir(parents=True, exist_ok=True)
     (settings.storage_path / "jobs").mkdir(parents=True, exist_ok=True)

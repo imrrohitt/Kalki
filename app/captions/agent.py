@@ -16,6 +16,8 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from pydantic import ValidationError
 
+from app.asr import known_terms_in, stabilize_copy
+from app.captions.heuristic import heuristic_caption_timeline
 from app.captions.models import CaptionTimeline
 from app.captions.validation import format_validation_error, validate_caption_timeline
 from app.config import settings
@@ -31,20 +33,23 @@ CAPTION_INSTRUCTION = """You are CaptionAgent, an autonomous Reels caption edito
 
 Complete the task yourself. Do not ask the user questions.
 
-Workflow:
-1. The user message already contains numbered transcript words.
-2. Group them into short, readable captions by meaning (usually 2-4 words).
-3. Call submit_caption_groups once with a JSON string of those groups.
-4. If the tool returns ok=false, fix the groups and submit again.
-5. After ok=true, reply DONE. Do not think out loud.
+The word list is ASR. It may be misspelled or the speaker may have misspoken. You do NOT put raw model tokens on screen.
 
-Rules:
-- Keep phrases together: fine tuning, RAG system, AI interviews, domain data, LLM.
-- Break after a complete thought, a question, or a pause.
-- caption text: UPPERCASE, max 2 lines, use \\n for a line break.
-- Each line ~12-20 characters. No emojis, hashtags, or extra punctuation except ?.
-- Lightly clean Hinglish grammar in the display text only.
-- emphasis_id: 0 or 1 word id per caption (payload words: RAG, LLM, AI, TUNING, DATA).
+Workflow:
+1. Read numbered ASR words (timing only).
+2. Group them into short captions by meaning (usually 2-4 words).
+3. WRITE the on-screen `text` yourself: correct English, correct technical spelling.
+4. Call submit_caption_groups once with JSON.
+5. If ok=false, fix and submit again.
+
+Display text rules:
+- `text` is the published caption, not a join of ASR tokens.
+- Fix slips: RAKA→RAG, fine tunning→Fine-tuning, lora→LoRA, destillation→distillation.
+- Keep the same meaning as those timed words. Do not invent extra claims.
+- Title Case. Max 2 lines, use \\n. Each line ~12–20 characters.
+- No emojis, hashtags. ? is OK.
+- Keep phrases together: Fine-tuning, RAG, AI interviews, domain data, LLM.
+- emphasis_id: 0 or 1 word id per caption (payload words that mean RAG, LLM, AI, Fine-tuning, DATA).
 - ids must be consecutive, cover every word in order, no duplicates, no skips.
 
 submit_caption_groups JSON:
@@ -52,7 +57,7 @@ submit_caption_groups JSON:
   "captions": [
     {
       "ids": [0, 1, 2],
-      "text": "IF YOU ARE\\nGIVING",
+      "text": "If You Are\\nGiving",
       "emphasis_id": 2,
       "position": "bottom_center"
     }
@@ -79,7 +84,7 @@ def _flatten_words(transcript: Transcript) -> list[Word]:
     words: list[Word] = []
     for seg in transcript.segments:
         for w in seg.words:
-            token = w.word.strip()
+            token = stabilize_copy(w.word.strip())
             if not token:
                 continue
             end = float(w.end) if w.end > w.start else float(w.start) + 0.08
@@ -142,17 +147,19 @@ def _captions_from_ids(
             emphasis_local = int(emphasis_id) + offset if emphasis_id is not None else None
         except (TypeError, ValueError):
             emphasis_local = None
-        text = str(group.get("text") or " ".join(w.word.upper() for w in group_words))
+        text = stabilize_copy(str(group.get("text") or " ".join(w.word for w in group_words)))
+        if not text:
+            text = stabilize_copy(" ".join(w.word for w in group_words))
         captions.append(
             {
                 "start": group_words[0].start,
                 "end": max(group_words[-1].end, group_words[0].start + 0.25),
-                "text": text.replace("\\n", "\n").strip(),
+                "text": text,
                 "position": group.get("position") or "bottom_center",
                 "animation": "pop",
                 "words": [
                     {
-                        "text": w.word,
+                        "text": stabilize_copy(w.word) or w.word,
                         "start": w.start,
                         "end": w.end,
                         "emphasis": used[local_i] == emphasis_local
@@ -169,11 +176,16 @@ def _captions_from_ids(
             {
                 "start": leftover[0].start,
                 "end": leftover[-1].end,
-                "text": " ".join(w.word.upper() for w in leftover),
+                "text": stabilize_copy(" ".join(w.word for w in leftover)),
                 "position": "bottom_center",
                 "animation": "pop",
                 "words": [
-                    {"text": w.word, "start": w.start, "end": w.end, "emphasis": False}
+                    {
+                        "text": stabilize_copy(w.word) or w.word,
+                        "start": w.start,
+                        "end": w.end,
+                        "emphasis": False,
+                    }
                     for w in leftover
                 ],
             }
@@ -293,10 +305,12 @@ class CaptionAgentService:
         payload = {
             "offset": offset,
             "duration": round(video_duration, 2),
+            "spell_as": known_terms_in(" ".join(w.word for w in words))
+            or ["RAG", "Fine-tuning", "LLM"],
             "words": [
                 {
                     "id": i,
-                    "text": w.word,
+                    "asr": w.word,
                     "start": round(w.start, 2),
                     "end": round(w.end, 2),
                 }
@@ -332,8 +346,9 @@ class CaptionAgentService:
 
         agent = self._build_agent([submit_caption_groups])
         prompt = (
-            "Caption this transcript chunk. Cover every word. "
-            "Call submit_caption_groups once with JSON. Do not wait for more input.\n\n"
+            "Write captions for this ASR chunk. Timing from ids. "
+            "On-screen text is YOUR rewrite — correct spelling, not raw ASR. "
+            "Cover every word. Call submit_caption_groups once.\n\n"
             + json.dumps(payload, ensure_ascii=False)
         )
         final_text = await self._run_agent(
@@ -364,6 +379,15 @@ class CaptionAgentService:
         video_duration: float,
         job_id: str,
     ) -> CaptionTimeline:
+        if settings.caption_heuristic_only:
+            timeline = heuristic_caption_timeline(transcript, video_duration)
+            logger.info(
+                "[%s] captions: heuristic only (%s groups)",
+                job_id[:8],
+                len(timeline.captions),
+            )
+            return timeline
+
         source_words = _flatten_words(transcript)
         if not source_words:
             raise RuntimeError("No words in transcript for caption generation")
@@ -373,7 +397,12 @@ class CaptionAgentService:
             chunks = [(0, source_words)]
         else:
             chunks = _chunk_words(source_words, chunk_seconds=chunk_seconds)
-        logger.info("caption agent: %s words in %s chunks", len(source_words), len(chunks))
+        logger.info(
+            "[%s] captions LLM: %s words in %s chunk(s)",
+            job_id[:8],
+            len(source_words),
+            len(chunks),
+        )
         sem = asyncio.Semaphore(3)
 
         async def run_one(
@@ -389,7 +418,8 @@ class CaptionAgentService:
                     chunk_index=index,
                 )
                 logger.info(
-                    "caption chunk %s/%s: %s words in %.1fs",
+                    "[%s] caption chunk %s/%s: %s words in %.1fs",
+                    job_id[:8],
                     index + 1,
                     len(chunks),
                     len(chunk),
@@ -397,12 +427,20 @@ class CaptionAgentService:
                 )
                 return index, captions
 
-        parts = await asyncio.gather(
-            *[run_one(i, offset, chunk) for i, (offset, chunk) in enumerate(chunks)]
-        )
-        all_captions: list[dict[str, Any]] = []
-        for _, captions in sorted(parts, key=lambda item: item[0]):
-            all_captions.extend(captions)
+        try:
+            parts = await asyncio.gather(
+                *[run_one(i, offset, chunk) for i, (offset, chunk) in enumerate(chunks)]
+            )
+            all_captions: list[dict[str, Any]] = []
+            for _, captions in sorted(parts, key=lambda item: item[0]):
+                all_captions.extend(captions)
 
-        data = {"version": "1.0", "style": "dynamic_social", "captions": all_captions}
-        return validate_caption_timeline(data, video_duration)
+            data = {"version": "1.0", "style": "dynamic_social", "captions": all_captions}
+            return validate_caption_timeline(data, video_duration)
+        except Exception as exc:
+            logger.warning(
+                "[%s] caption LLM failed (%s); using heuristic grouping",
+                job_id[:8],
+                exc,
+            )
+            return heuristic_caption_timeline(transcript, video_duration)

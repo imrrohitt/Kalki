@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from app.config import settings
 from app.pipeline.jobs import JobStatus, job_store
 from app.pipeline.runner import Pipeline
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
 _pipeline: Pipeline | None = None
 
@@ -40,6 +42,13 @@ async def upload_video(
 
     job.source_path = str(dest)
     job.set_stage(JobStatus.uploaded)
+    size_mb = dest.stat().st_size / (1024 * 1024)
+    logger.info(
+        "[%s] uploaded %s (%.1f MB)",
+        job.job_id[:8],
+        file.filename,
+        size_mb,
+    )
 
     background_tasks.add_task(get_pipeline().run, job.job_id)
 

@@ -35,6 +35,18 @@ def validate_edit_timeline(
             )
         last_end = max(last_end, zoom.span_end)
 
+    last_g = -1.0
+    for index, graphic in enumerate(sorted(timeline.graphics, key=lambda g: g.start)):
+        if graphic.end > video_duration + 0.12:
+            errors.append(
+                f"graphics[{index}].end ({graphic.end}) exceeds video duration ({video_duration})"
+            )
+        if graphic.start < last_g - 0.02:
+            errors.append(
+                f"graphics[{index}] overlaps previous graphic ending at {last_g:.3f}"
+            )
+        last_g = graphic.end
+
     if errors:
         raise EditPlanValidationError("; ".join(errors))
     return timeline

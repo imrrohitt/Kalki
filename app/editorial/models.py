@@ -229,6 +229,78 @@ class BrollDecision(BaseModel):
     confidence: float = 0.0
 
 
+GraphicKind = Literal[
+    "term_card",
+    "vs_split",
+    "stat",
+    "chip_row",
+    "process",
+    "quote",
+    "topic",
+    "bullets",
+]
+GraphicMotion = Literal["fade", "slide_up", "scale_in"]
+SfxKind = Literal["whoosh", "swoosh", "impact", "hit"]
+
+
+class SfxHit(BaseModel):
+    """One timed sound effect under the voice track."""
+
+    at: float = Field(..., ge=0.0)
+    kind: SfxKind
+    gain: float = Field(0.26, ge=0.05, le=0.8)
+    reason: str = ""
+
+
+class GraphicBullet(BaseModel):
+    """One line that builds in after the title."""
+
+    text: str
+    icon: str = ""
+    delay_ms: int = Field(0, ge=0, le=4000)
+
+    @field_validator("text")
+    @classmethod
+    def text_not_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("bullet text must not be empty")
+        return value
+
+
+class GraphicBeat(BaseModel):
+    """One motion card in the top half of a split reel."""
+
+    start: float
+    end: float
+    kind: GraphicKind = "term_card"
+    title: str
+    subtitle: str = ""
+    kicker: str = ""
+    icon: str = ""
+    glyph: str = ""
+    chips: list[str] = Field(default_factory=list)
+    bullets: list[GraphicBullet] = Field(default_factory=list)
+    left: str = ""
+    right: str = ""
+    motion: GraphicMotion = "slide_up"
+    confidence: float = Field(0.6, ge=0.0, le=1.0)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("graphic title must not be empty")
+        return value
+
+    @model_validator(mode="after")
+    def check_times(self) -> GraphicBeat:
+        if self.end <= self.start:
+            raise ValueError("graphic.end must be > start")
+        return self
+
+
 class TransitionDecision(BaseModel):
     at: float
     kind: str = "cut"

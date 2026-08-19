@@ -351,12 +351,24 @@ class EditorialAnalyzer:
         visual = visual or default_visual()
         windows = build_sentence_windows(transcript)
         if not windows:
+            logger.info("[%s] editorial: no sentences", job_id[:8])
             return EditorialAnalysis()
         if not self.use_llm:
-            return heuristic_analyze(windows)
+            analysis = heuristic_analyze(windows)
+            logger.info(
+                "[%s] editorial: heuristic (LLM off), %s sentences",
+                job_id[:8],
+                len(analysis.sentences),
+            )
+            return analysis
 
         chunks = _chunk_windows(windows)
-        logger.info("editorial analyzer: %s sentences in %s chunks", len(windows), len(chunks))
+        logger.info(
+            "[%s] editorial LLM: %s sentences in %s chunk(s)",
+            job_id[:8],
+            len(windows),
+            len(chunks),
+        )
         try:
             sem = asyncio.Semaphore(3)
 
@@ -382,6 +394,10 @@ class EditorialAnalyzer:
                 story_patterns=merged_patterns,
             )
             return merge_annotations(windows, combined)
-        except Exception:
-            logger.exception("editorial LLM failed; using heuristic fallback")
+        except Exception as exc:
+            logger.warning(
+                "[%s] editorial LLM failed (%s); using heuristic fallback",
+                job_id[:8],
+                exc,
+            )
             return heuristic_analyze(windows)

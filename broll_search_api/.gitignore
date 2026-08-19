@@ -1,0 +1,4 @@
+storage/
+assets/
+__pycache__/
+*.pyc

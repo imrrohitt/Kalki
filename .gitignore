@@ -9,3 +9,4 @@ output/
 *.mp4
 *.wav
 !assets/**
+assets/fonts/Apple Color Emoji.ttc

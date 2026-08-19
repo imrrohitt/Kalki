@@ -42,6 +42,17 @@ def test_captions_from_ids_groups_and_emphasis():
     assert captions[0]["words"][0]["emphasis"] is False
 
 
+def test_captions_rewrite_asr_slips():
+    words = _words("the", "RAKA", "system")
+    captions = _captions_from_ids(
+        [{"ids": [0, 1, 2], "text": "THE RAKA\\nSYSTEM"}],
+        words,
+    )
+    assert "RAG" in captions[0]["text"]
+    assert "RAKA" not in captions[0]["text"]
+    assert captions[0]["words"][1]["text"] == "RAG"
+
+
 def test_captions_from_ids_fills_skipped_words():
     words = _words("a", "b", "c")
     captions = _captions_from_ids([{"ids": [0, 2], "text": "A C"}], words)
