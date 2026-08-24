@@ -37,19 +37,40 @@ def build_split_filtergraph(
     ass_escaped: str,
     fonts_dir: str,
     zoom_graph: str | None = None,
-    top_color: str = "0xF4EFE6",
+    top_color: str | None = None,
+    theme: str | None = None,
 ) -> str:
     """Talking head in the bottom panel, motion canvas on top, captions on the seam."""
+    from app.renderer.design import get_theme
+
     _ = zoom_graph
+    th = get_theme(theme)
     top_h, head_h = split_panel_sizes(height)
     finish = f"fps={fps},format=yuv420p,ass={ass_escaped}:fontsdir={fonts_dir}[vout]"
-    color = (
-        f"color=c={top_color}:s={width}x{top_h}:d=3600:r={fps},"
-        f"format=yuv420p[top]"
-    )
+    if top_color:
+        canvas = (
+            f"color=c={top_color}:s={width}x{top_h}:d=3600:r={fps},"
+            f"format=yuv420p[top]"
+        )
+    else:
+        # Near-flat vertical gradient: the canvas gets a hint of depth
+        # without competing with the type.
+        grid = ""
+        if th.grid:
+            grid = (
+                f",drawgrid=w=90:h=90:t=1:"
+                f"color={th.grid_color}@{th.grid_opacity}"
+            )
+        canvas = (
+            f"gradients=s={width}x{top_h}:type=linear:"
+            f"x0={width // 2}:y0=0:x1={width // 2}:y1={top_h}:"
+            f"c0={th.bg_top}:c1={th.bg_bottom}:"
+            f"speed=0.00001:duration=3600:rate={fps}"
+            f"{grid},format=yuv420p[top]"
+        )
     return (
         f"[0:v]{head_panel_filter(width, head_h)}[head];"
-        f"{color};"
+        f"{canvas};"
         f"[top][head]vstack=inputs=2[vbase];"
         f"[vbase]{finish}"
     )

@@ -9,6 +9,7 @@ from app.editorial.broll.agent import BrollAgent
 from app.editorial.cuts.agent import CutAgent
 from app.editorial.graphics.agent import GraphicsAgent
 from app.editorial.models import EditorialAnalysis, VisualContext
+from app.editorial.scenes.agent import SceneDirectorAgent
 from app.editorial.sfx.agent import SfxAgent
 from app.editorial.zoom.agent import ZoomDecisionEngine
 from app.timeline.models import EditTimeline
@@ -33,6 +34,7 @@ class EditorialIntelligenceEngine:
         self.broll_agent = broll_agent or BrollAgent()
         self.cut_agent = cut_agent or CutAgent()
         self.graphics_agent = GraphicsAgent()
+        self.scene_director = SceneDirectorAgent()
         self.sfx_agent = SfxAgent()
 
     async def analyze(
@@ -89,6 +91,35 @@ class EditorialIntelligenceEngine:
             zooms=zooms,
             broll=broll,
             cuts=cuts,
+            graphics=graphics,
+            sfx=sfx,
+        )
+        return validate_edit_timeline(timeline, video_duration)
+
+    async def plan_reel(
+        self,
+        analysis: EditorialAnalysis,
+        captions: CaptionTimeline,
+        *,
+        video_duration: float,
+        job_id: str = "reel",
+    ) -> EditTimeline:
+        jid = job_id[:8]
+        graphics = await self.scene_director.plan(
+            analysis,
+            video_duration=video_duration,
+            job_id=job_id,
+        )
+        logger.info("[%s] scenes: %s cards", jid, len(graphics))
+        sfx = await self.sfx_agent.plan(
+            analysis,
+            graphics,
+            video_duration=video_duration,
+            job_id=job_id,
+        )
+        logger.info("[%s] sfx: %s hits", jid, len(sfx))
+        timeline = EditTimeline(
+            captions=list(captions.captions),
             graphics=graphics,
             sfx=sfx,
         )

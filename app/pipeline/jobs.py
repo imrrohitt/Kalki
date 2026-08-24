@@ -11,6 +11,7 @@ class JobStatus(str, Enum):
     validating = "validating"
     extracting_audio = "extracting_audio"
     transcribing = "transcribing"
+    repairing_transcript = "repairing_transcript"
     analyzing_editorial = "analyzing_editorial"
     generating_captions = "generating_captions"
     planning_edits = "planning_edits"
@@ -24,6 +25,7 @@ STAGE_PROGRESS = {
     JobStatus.validating: 10,
     JobStatus.extracting_audio: 25,
     JobStatus.transcribing: 45,
+    JobStatus.repairing_transcript: 52,
     JobStatus.analyzing_editorial: 58,
     JobStatus.generating_captions: 72,
     JobStatus.planning_edits: 82,
@@ -37,6 +39,8 @@ STAGE_PROGRESS = {
 class Job:
     job_id: str
     source_path: str
+    kind: str = "video"
+    theme: str = ""
     status: JobStatus = JobStatus.uploaded
     stage: str = JobStatus.uploaded.value
     progress: int = 5
@@ -58,8 +62,8 @@ class JobStore:
     def __init__(self) -> None:
         self._jobs: dict[str, Job] = {}
 
-    def create(self, source_path: str) -> Job:
-        job = Job(job_id=str(uuid.uuid4()), source_path=source_path)
+    def create(self, source_path: str, *, kind: str = "video") -> Job:
+        job = Job(job_id=str(uuid.uuid4()), source_path=source_path, kind=kind)
         self._jobs[job.job_id] = job
         return job
 

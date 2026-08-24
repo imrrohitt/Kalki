@@ -53,7 +53,7 @@ def plan_sfx(
             hits.append(SfxHit(at=start + 0.06, kind="swoosh", gain=0.24, reason="compare"))
         elif graphic.kind == "stat":
             hits.append(SfxHit(at=start + 0.08, kind="hit", gain=0.26, reason="number"))
-        elif graphic.kind == "process":
+        elif graphic.kind in {"process", "diagram", "chip_row"}:
             hits.append(SfxHit(at=start + 0.05, kind="whoosh", gain=0.22, reason="steps"))
         elif kicker in {"HOOK", "REVEAL"}:
             hits.append(SfxHit(at=start, kind="impact", gain=0.30, reason=kicker.lower()))

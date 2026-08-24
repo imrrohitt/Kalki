@@ -176,6 +176,45 @@ def test_short_headline_stays_on_one_line(tmp_path):
     assert not any(ln.endswith("Defined") and "Quantization" not in ln for ln in title_events)
 
 
+def test_themes_change_palette_and_background(tmp_path):
+    from app.captions.models import CaptionTimeline
+    from app.renderer.design import THEMES, get_theme
+    from app.renderer.split import build_split_filtergraph
+
+    beat = GraphicBeat(start=0.0, end=3.0, kind="bullets", title="90% fail", kicker="HOOK")
+    outputs = {}
+    for name in THEMES:
+        path = tmp_path / f"{name}.ass"
+        write_ass_file(
+            CaptionTimeline(captions=[]),
+            str(path),
+            graphics=[beat],
+            split_layout=True,
+            video_duration=3.0,
+            theme=name,
+        )
+        outputs[name] = path.read_text()
+    assert THEMES["noir"].ink in outputs["noir"]
+    assert THEMES["noir"].accent in outputs["noir"]
+    assert THEMES["paper"].accent in outputs["paper"]
+    assert outputs["noir"] != outputs["paper"]
+    # Unknown themes fall back to the default palette.
+    assert get_theme("bogus").name == "paper"
+
+    graph = build_split_filtergraph(
+        width=1080, height=1920, fps=30,
+        ass_escaped="x.ass", fonts_dir="/fonts", theme="tech",
+    )
+    assert THEMES["tech"].bg_top in graph
+    assert "drawgrid" in graph
+    paper_graph = build_split_filtergraph(
+        width=1080, height=1920, fps=30,
+        ass_escaped="x.ass", fonts_dir="/fonts",
+    )
+    assert "drawgrid" not in paper_graph
+    assert THEMES["paper"].bg_top in paper_graph
+
+
 def test_cover_duration_closes_gaps():
     beats = [
         GraphicBeat(start=1.0, end=4.0, kind="bullets", title="One"),

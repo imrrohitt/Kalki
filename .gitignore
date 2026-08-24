@@ -8,5 +8,6 @@ storage/
 output/
 *.mp4
 *.wav
+!docs/samples/*.mp4
 !assets/**
 assets/fonts/Apple Color Emoji.ttc

@@ -32,10 +32,14 @@ class Settings(BaseSettings):
     output_height: int = 1920
     output_fps: int = 30
     split_layout_enabled: bool = True
+    # Visual theme for split-layout motion graphics: paper|noir|tech|ivory.
+    graphics_theme: str = "paper"
     caption_heuristic_only: bool = False
     editorial_llm_enabled: bool = True
     graphics_llm_enabled: bool = True
     sfx_llm_enabled: bool = True
+    transcript_repair_llm_enabled: bool = True
+    scenes_llm_enabled: bool = True
     sfx_enabled: bool = True
     sfx_dir: str = "Sound Effects V4"
     zoom_max_scale: float = 1.35

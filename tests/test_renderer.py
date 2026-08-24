@@ -291,3 +291,59 @@ def test_renderer_mixes_sfx(tiny_video: Path, tmp_path: Path):
     )
     assert out.exists()
     assert out.stat().st_size > 1000
+
+
+def test_audio_reel_renderer_writes_mp4(tmp_path: Path):
+    from app.editorial.models import GraphicBeat, SfxHit
+
+    wav = tmp_path / "voice.wav"
+    subprocess.run(
+        [
+            settings.ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            str(wav),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    out = tmp_path / "reel.mp4"
+    FFmpegRenderer(font_path=str(settings.font_path)).render_audio_reel(
+        source_audio=str(wav),
+        caption_timeline=CaptionTimeline(
+            captions=[
+                Caption(
+                    start=0.2,
+                    end=1.6,
+                    text="Why RAG",
+                    words=[
+                        CaptionWord(text="Why", start=0.2, end=0.7),
+                        CaptionWord(text="RAG", start=0.7, end=1.6, emphasis=True),
+                    ],
+                )
+            ]
+        ),
+        output_path=str(out),
+        graphics=[
+            GraphicBeat(
+                start=0.0,
+                end=2.0,
+                kind="diagram",
+                title="How RAG Works",
+                kicker="HOOK",
+                chips=["Ask", "Retrieve", "Answer"],
+            )
+        ],
+        sfx=[SfxHit(at=0.12, kind="impact", reason="hook")],
+        audio_duration=2.0,
+        theme="paper",
+    )
+    assert out.exists()
+    assert out.stat().st_size > 1000
+    ass = out.with_suffix(".ass").read_text()
+    assert "How RAG Works" in ass
+    assert r"\pos(540,1748)" in ass
+    assert "GNode" in ass

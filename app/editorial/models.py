@@ -235,6 +235,7 @@ GraphicKind = Literal[
     "stat",
     "chip_row",
     "process",
+    "diagram",
     "quote",
     "topic",
     "bullets",
@@ -252,12 +253,27 @@ class SfxHit(BaseModel):
     reason: str = ""
 
 
+class GraphicNode(BaseModel):
+    """One boxed label in a full-canvas scene diagram."""
+
+    label: str
+    sub: str = ""
+
+    @field_validator("label")
+    @classmethod
+    def label_not_empty(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("node label must not be empty")
+        return value
+
+
 class GraphicBullet(BaseModel):
     """One line that builds in after the title."""
 
     text: str
     icon: str = ""
-    delay_ms: int = Field(0, ge=0, le=4000)
+    delay_ms: int = Field(0, ge=0, le=5000)
 
     @field_validator("text")
     @classmethod
@@ -269,7 +285,7 @@ class GraphicBullet(BaseModel):
 
 
 class GraphicBeat(BaseModel):
-    """One motion card in the top half of a split reel."""
+    """One motion card: split-reel top panel, or a full 9:16 scene."""
 
     start: float
     end: float
@@ -280,6 +296,7 @@ class GraphicBeat(BaseModel):
     icon: str = ""
     glyph: str = ""
     chips: list[str] = Field(default_factory=list)
+    nodes: list[GraphicNode] = Field(default_factory=list)
     bullets: list[GraphicBullet] = Field(default_factory=list)
     left: str = ""
     right: str = ""

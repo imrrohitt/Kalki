@@ -125,6 +125,115 @@ def test_upload_job_status_and_result(tmp_path, monkeypatch):
         assert "video" in result.headers["content-type"]
 
 
+def _make_audio(path: Path) -> None:
+    import subprocess
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:duration=2",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_upload_audio_reel_job_status_and_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
+    from app.config import Settings
+
+    test_settings = Settings(
+        storage_dir=str(tmp_path / "storage"),
+        caption_font_path="assets/fonts/Montserrat-Bold.ttf",
+        transcript_repair_llm_enabled=False,
+        scenes_llm_enabled=False,
+        editorial_llm_enabled=False,
+        sfx_llm_enabled=False,
+    )
+    monkeypatch.setattr("app.config.settings", test_settings)
+    monkeypatch.setattr("app.api.routes.settings", test_settings)
+    monkeypatch.setattr("app.pipeline.runner.settings", test_settings)
+
+    fake_transcript = Transcript(
+        language="en",
+        language_probability=0.99,
+        duration=2.0,
+        segments=[
+            Segment(
+                start=0.0,
+                end=1.5,
+                text="why rag beats fine tuning",
+                words=[
+                    Word(word="why", start=0.0, end=0.4, probability=0.9),
+                    Word(word="rag", start=0.4, end=0.8, probability=0.9),
+                    Word(word="beats", start=0.8, end=1.1, probability=0.9),
+                    Word(word="fine", start=1.1, end=1.3, probability=0.9),
+                    Word(word="tuning", start=1.3, end=1.6, probability=0.9),
+                ],
+            )
+        ],
+    )
+    fake_timeline = CaptionTimeline(
+        captions=[
+            Caption(
+                start=0.0,
+                end=1.2,
+                text="Why RAG",
+                words=[
+                    CaptionWord(text="Why", start=0.0, end=0.5, emphasis=True),
+                    CaptionWord(text="RAG", start=0.5, end=1.0, emphasis=False),
+                ],
+            )
+        ]
+    )
+
+    stt = MagicMock()
+    stt.transcribe = AsyncMock(return_value=fake_transcript)
+    agent = MagicMock()
+    agent.generate = AsyncMock(return_value=fake_timeline)
+    routes._pipeline = Pipeline(
+        stt=stt,
+        caption_agent=agent,
+        renderer=FFmpegRenderer(font_path=str(test_settings.font_path)),
+    )
+
+    app = create_app()
+    audio = tmp_path / "talk.wav"
+    _make_audio(audio)
+
+    with TestClient(app) as client:
+        with audio.open("rb") as f:
+            resp = client.post(
+                "/api/v1/reels",
+                files={"file": ("talk.wav", f, "audio/wav")},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["kind"] == "audio_reel"
+        job_id = body["job_id"]
+
+        status = None
+        for _ in range(60):
+            status = client.get(f"/api/v1/jobs/{job_id}").json()
+            if status["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+
+        assert status is not None
+        assert status["status"] == "completed", status
+        assert status["kind"] == "audio_reel"
+        assert status["metrics"].get("graphic_count", 0) >= 1
+
+        result = client.get(f"/api/v1/jobs/{job_id}/result")
+        assert result.status_code == 200
+        assert "video" in result.headers["content-type"]
+
+
 def test_job_not_found(tmp_path, monkeypatch):
     monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
     from app.config import Settings

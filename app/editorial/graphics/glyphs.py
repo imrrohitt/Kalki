@@ -40,6 +40,7 @@ _EMOJI_GLYPH = {
 _KIND_GLYPH = {
     "vs_split": "scale",
     "process": "loop",
+    "diagram": "loop",
     "stat": "chart",
     "quote": "spark",
     "topic": "target",

@@ -24,7 +24,7 @@ from app.asr import fix_asr_text, stabilize_copy
 from app.editorial.graphics.glyphs import resolve_glyph
 from app.editorial.graphics.planner import cover_duration, plan_graphics
 from app.editorial.graphics.terms import extract_terms
-from app.editorial.models import EditorialAnalysis, GraphicBeat, GraphicBullet
+from app.editorial.models import EditorialAnalysis, GraphicBeat, GraphicBullet, GraphicNode
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,16 @@ You complete the job yourself. Do not ask questions.
 - process: 3 chips, 1–2 words each.
 - stat: a number or short metric + one subtitle.
 
+## Kind variety (important)
+Do NOT make every card "bullets". Pick the kind that matches the sentence:
+- A number is the point ("1000 tables", "73%", "3x") → stat (we animate a count-up).
+- A pipeline, flow, or sequence of steps → process. process MUST include
+  exactly 3 chips (1–2 words each, e.g. "Question","Query","Answer");
+  if you cannot name 3 concrete steps, use bullets instead.
+- Two things compared or contrasted → vs_split.
+- A strong spoken question or one-liner → topic with a short display title.
+Aim for at least one stat / process / vs_split when the content supports it.
+
 ## Glyphs
 search | brain | scale | gear | chart | bolt | docs | loop | target | spark | shield | clock
 
@@ -96,28 +106,49 @@ def _glossary(sentences: list[dict[str, Any]]) -> list[str]:
     return [name for name, _sub in extract_terms(blob)]
 
 
-def _stabilize_beat(beat: GraphicBeat) -> GraphicBeat:
+def _stabilize_beat(beat: GraphicBeat, *, canvas: str = "split") -> GraphicBeat:
+    full = canvas == "full"
+    title_n = 44 if full else 40
+    sub_n = 42 if full else 28
+    bullet_n = 44 if full else 32
+    chip_n = 18 if full else 12
+    side_n = 18 if full else 16
+    nodes = [
+        GraphicNode(
+            label=_clip_words(n.label, 20 if full else 12),
+            sub=_clip_words(n.sub, 36 if full else 20),
+        )
+        for n in (beat.nodes or [])[: (6 if full else 3)]
+        if n.label.strip()
+    ]
+    bullets = list(beat.bullets)[: (5 if full else 2)]
     return beat.model_copy(
         update={
-            "title": stabilize_copy(beat.title)[:40],
-            "subtitle": stabilize_copy(beat.subtitle)[:28],
-            "left": stabilize_copy(beat.left)[:16],
-            "right": stabilize_copy(beat.right)[:16],
-            "chips": [stabilize_copy(c)[:12] for c in beat.chips],
+            "title": _clip_words(beat.title, title_n),
+            "subtitle": _clip_words(beat.subtitle, sub_n),
+            "left": _clip_words(beat.left, side_n),
+            "right": _clip_words(beat.right, side_n),
+            "chips": [_clip_words(c, chip_n) for c in beat.chips[: (6 if full else 3)]],
+            "nodes": nodes,
             "bullets": [
-                b.model_copy(update={"text": stabilize_copy(b.text)[:32]})
-                for b in beat.bullets
+                b.model_copy(update={"text": _clip_words(b.text, bullet_n)})
+                for b in bullets
             ],
         }
     )
 
 
-def _beats_from_payload(raw: Any, duration: float) -> list[GraphicBeat]:
+def _beats_from_payload(
+    raw: Any, duration: float, *, canvas: str = "split"
+) -> list[GraphicBeat]:
     if isinstance(raw, str):
         raw = _extract_json(raw)
     items = raw.get("graphics") if isinstance(raw, dict) else raw
+    if isinstance(raw, dict) and not isinstance(items, list):
+        items = raw.get("scenes")
     if not isinstance(items, list):
         raise ValueError("expected graphics array")
+    full = canvas == "full"
     beats: list[GraphicBeat] = []
     for item in items:
         if not isinstance(item, dict):
@@ -129,30 +160,39 @@ def _beats_from_payload(raw: Any, duration: float) -> list[GraphicBeat]:
             "stat",
             "chip_row",
             "process",
+            "diagram",
             "quote",
             "topic",
             "bullets",
         }:
             kind = "bullets"
-        max_bullets = 0 if kind == "vs_split" else (1 if kind in {"process", "stat"} else 2)
+        if full:
+            max_bullets = 5
+        elif kind == "vs_split":
+            max_bullets = 0
+        elif kind in {"process", "diagram", "stat"}:
+            max_bullets = 1
+        else:
+            max_bullets = 2
+        bullet_n = 44 if full else 32
         bullets_raw = item.get("bullets") or []
         bullets: list[GraphicBullet] = []
         for i, b in enumerate(bullets_raw[:max_bullets]):
             if isinstance(b, str):
-                text = _clip_words(b, 32)
+                text = _clip_words(b, bullet_n)
                 if text:
-                    bullets.append(GraphicBullet(text=text, delay_ms=i * 520))
+                    bullets.append(GraphicBullet(text=text, delay_ms=i * 420))
                 continue
             if not isinstance(b, dict):
                 continue
-            text = _clip_words(str(b.get("text") or ""), 32)
+            text = _clip_words(str(b.get("text") or ""), bullet_n)
             if not text:
                 continue
             bullets.append(
                 GraphicBullet(
                     text=text,
                     icon=str(b.get("icon") or "")[:8],
-                    delay_ms=int(b.get("delay_ms") if b.get("delay_ms") is not None else i * 520),
+                    delay_ms=int(b.get("delay_ms") if b.get("delay_ms") is not None else i * 420),
                 )
             )
         start = float(item.get("start") or 0)
@@ -160,7 +200,7 @@ def _beats_from_payload(raw: Any, duration: float) -> list[GraphicBeat]:
         end = min(end, duration)
         if end - start < 1.2:
             continue
-        title = _clip_words(str(item.get("title") or "").strip(), 40)
+        title = _clip_words(str(item.get("title") or "").strip(), 44 if full else 40)
         if not title:
             continue
         glyph = resolve_glyph(
@@ -171,25 +211,50 @@ def _beats_from_payload(raw: Any, duration: float) -> list[GraphicBeat]:
         motion = str(item.get("motion") or "")
         if motion not in {"fade", "slide_up", "scale_in"}:
             motion = "scale_in" if kind == "stat" else "slide_up"
+        chip_n = 18 if full else 12
+        chips = [
+            _clip_words(str(c), chip_n)
+            for c in (item.get("chips") or [])[: (6 if full else 3)]
+            if str(c).strip()
+        ]
+        nodes: list[GraphicNode] = []
+        for n in (item.get("nodes") or [])[:6]:
+            if isinstance(n, str):
+                label = _clip_words(n, 20)
+                if label:
+                    nodes.append(GraphicNode(label=label))
+                continue
+            if not isinstance(n, dict):
+                continue
+            label = _clip_words(str(n.get("label") or n.get("text") or ""), 20)
+            if not label:
+                continue
+            nodes.append(
+                GraphicNode(
+                    label=label,
+                    sub=_clip_words(str(n.get("sub") or n.get("detail") or ""), 36),
+                )
+            )
         beats.append(
             GraphicBeat(
                 start=round(start, 3),
                 end=round(end, 3),
                 kind=kind,  # type: ignore[arg-type]
                 title=title,
-                subtitle=_clip_words(str(item.get("subtitle") or ""), 28),
+                subtitle=_clip_words(str(item.get("subtitle") or ""), 42 if full else 28),
                 kicker=_clip_words(str(item.get("kicker") or "").upper(), 14),
                 icon=str(item.get("icon") or "")[:8],
                 glyph=glyph,
-                chips=[_clip_words(str(c), 12) for c in (item.get("chips") or [])[:3] if str(c).strip()],
+                chips=chips,
+                nodes=nodes,
                 bullets=bullets,
-                left=_clip_words(str(item.get("left") or ""), 16),
-                right=_clip_words(str(item.get("right") or ""), 16),
+                left=_clip_words(str(item.get("left") or ""), 18 if full else 16),
+                right=_clip_words(str(item.get("right") or ""), 18 if full else 16),
                 motion=motion,  # type: ignore[arg-type]
                 confidence=0.82,
             )
         )
-    return [_stabilize_beat(b) for b in beats]
+    return [_stabilize_beat(b, canvas=canvas) for b in beats]
 
 
 class GraphicsAgent:
@@ -345,11 +410,34 @@ class GraphicsAgent:
             merged: list[GraphicBeat] = []
             for i, chunk in enumerate(chunks):
                 logger.info("[%s] graphics chunk %s/%s", job_id[:8], i + 1, len(chunks))
-                merged.extend(
-                    await self._generate_chunk(
-                        chunk, video_duration, job_id, i, glossary=glossary
+                # A failed chunk must not sink the whole plan: retry once,
+                # then skip it (cover_duration stretches neighbors over gaps).
+                try:
+                    merged.extend(
+                        await self._generate_chunk(
+                            chunk, video_duration, job_id, i, glossary=glossary
+                        )
                     )
-                )
+                except Exception as chunk_exc:
+                    logger.warning(
+                        "[%s] graphics chunk %s failed (%s); retrying once",
+                        job_id[:8],
+                        i + 1,
+                        chunk_exc,
+                    )
+                    try:
+                        merged.extend(
+                            await self._generate_chunk(
+                                chunk, video_duration, job_id, i + 100, glossary=glossary
+                            )
+                        )
+                    except Exception as retry_exc:
+                        logger.warning(
+                            "[%s] graphics chunk %s failed twice (%s); skipping",
+                            job_id[:8],
+                            i + 1,
+                            retry_exc,
+                        )
             if not merged:
                 logger.warning(
                     "[%s] graphics LLM returned nothing; using heuristic",
