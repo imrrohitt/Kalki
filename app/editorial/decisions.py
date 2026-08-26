@@ -59,9 +59,13 @@ class EditorialIntelligenceEngine:
         video_duration: float,
         visual: VisualContext | None = None,
         job_id: str = "edit",
+        split_layout: bool | None = None,
     ) -> EditTimeline:
         jid = job_id[:8]
-        if settings.split_layout_enabled:
+        use_split = (
+            settings.split_layout_enabled if split_layout is None else split_layout
+        )
+        if use_split:
             zooms = []
             logger.info("[%s] zooms: skipped (split layout keeps the full face)", jid)
         else:

@@ -106,7 +106,9 @@ def test_upload_job_status_and_result(tmp_path, monkeypatch):
                 files={"file": ("clip.mp4", f, "video/mp4")},
             )
         assert resp.status_code == 200
-        job_id = resp.json()["job_id"]
+        body = resp.json()
+        assert body["split_screen"] is False
+        job_id = body["job_id"]
 
         status = None
         for _ in range(40):
@@ -250,3 +252,58 @@ def test_job_not_found(tmp_path, monkeypatch):
     with TestClient(app) as client:
         assert client.get("/api/v1/jobs/does-not-exist").status_code == 404
         _ = job_store
+
+
+def test_videos_query_params_theme_and_split_screen(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
+    from app.config import Settings
+
+    test_settings = Settings(storage_dir=str(tmp_path / "storage"))
+    monkeypatch.setattr("app.config.settings", test_settings)
+    monkeypatch.setattr("app.api.routes.settings", test_settings)
+    routes._pipeline = MagicMock()
+    routes._pipeline.run = AsyncMock()
+    app = create_app()
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not-a-real-video")
+
+    with TestClient(app) as client:
+        with video.open("rb") as f:
+            default = client.post(
+                "/api/v1/videos?theme=tech",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert default.status_code == 200
+        body = default.json()
+        assert body["theme"] == "tech"
+        assert body["split_screen"] is False
+
+        job = job_store.get(body["job_id"])
+        assert job is not None
+        assert job.theme == "tech"
+        assert job.split_layout is False
+
+        status = client.get(f"/api/v1/jobs/{body['job_id']}").json()
+        assert status["theme"] == "tech"
+        assert status["split_screen"] is False
+
+        with video.open("rb") as f:
+            split = client.post(
+                "/api/v1/videos?theme=noir&split_screen=true",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert split.status_code == 200
+        body = split.json()
+        assert body["theme"] == "noir"
+        assert body["split_screen"] is True
+
+        job = job_store.get(body["job_id"])
+        assert job is not None
+        assert job.split_layout is True
+
+        with video.open("rb") as f:
+            bad = client.post(
+                "/api/v1/videos?theme=bogus",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert bad.status_code == 400

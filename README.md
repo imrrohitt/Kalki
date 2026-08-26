@@ -29,14 +29,14 @@
 
 ---
 
-Upload a clip or an audio file. The pipeline transcribes with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), runs a chain of Google ADK agents (DeepSeek via LiteLLM), and composites a vertical reel: kinetic captions, motion-graphics cards, timed SFX, and — for camera footage — a split layout with graphics on top and the speaker below.
+Upload a clip or an audio file. The pipeline transcribes with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), runs a chain of Google ADK agents (DeepSeek via LiteLLM), and composites a vertical reel: kinetic captions, motion-graphics cards, and timed SFX. Talking-head jobs are full-frame by default (captions and zooms on the speaker). Pass `split_screen=true` to put graphics on top and the speaker below.
 
 Two products, one engine:
 
 | | Talking-head video | Audio-only reel |
 | --- | --- | --- |
 | **Input** | MP4 / MOV talking-head | WAV, MP3, M4A, AAC, FLAC, Opus |
-| **Layout** | Split canvas — graphics above, face below | Full-frame 1080×1920 motion graphics |
+| **Layout** | Full-frame 9:16 (default). Split canvas when `split_screen=true` | Full-frame 1080×1920 motion graphics |
 | **Endpoint** | `POST /api/v1/videos` | `POST /api/v1/reels` |
 | **CLI** | `scripts/run_pipeline.py` | `scripts/run_reel.py` |
 
@@ -88,7 +88,7 @@ Audio-only path (no camera). The scene director fills the entire 9:16 frame:
 
 ## Themes
 
-Four locked palettes. Neutral carries the frame; accent is reserved for kickers, indices, and stats. Override per job with `?theme=` or the CLI third argument.
+Four locked palettes. Neutral carries the frame; accent is reserved for kickers, indices, and stats. Override per job with `?theme=` (same query-string style as `split_screen`) or the CLI third argument.
 
 <p align="center">
   <img src="docs/samples/theme-paper.jpg" width="170" alt="Paper theme">
@@ -129,7 +129,7 @@ The graphics planner picks a card kind from the sentence — hook, contrast, num
 | `process` / `diagram` | A sequence of steps |
 | `quote` / `topic` | A take, a line worth holding |
 
-Captions sit on the picture: Montserrat, two-line grouping, keyword color from the theme. SFX hits (`whoosh`, `swoosh`, `impact`, `hit`) land on card changes from `Sound Effects V4`. Talking-head jobs also get scored punch-in zooms.
+Captions sit on the picture: Montserrat, two-line grouping, keyword color from the theme. SFX hits (`whoosh`, `swoosh`, `impact`, `hit`) land on card changes from `Sound Effects V4`. Full-frame talking-head jobs also get scored punch-in zooms; split-screen jobs keep the full face instead.
 
 ## Pipeline
 
@@ -153,11 +153,11 @@ flowchart LR
 3. **Repair** — ADK agent corrects Whisper slips (`RAKA` → `RAG`) without rewriting the talk.
 4. **Editorial** — roles, hooks, numbers, contrast, story position.
 5. **Captions** — grouped on-screen lines with emphasis spans.
-6. **Scenes** — full-frame cards for audio reels; split-layout cards for talking-head.
+6. **Scenes** — full-frame cards for audio reels; split-layout cards when `split_screen=true`.
 7. **SFX** — timed hits under the voice.
 8. **Render** — FFmpeg: gradients, grid, ASS overlays, zoom, mix, H.264.
 
-Talking-head jobs skip transcript repair and the scene director; they use zoom + split graphics instead.
+Talking-head jobs skip transcript repair and the scene director. Split jobs use split graphics and skip punch-in zooms; the default full-frame path uses zoom + overlay graphics instead.
 
 ## Quick start
 
@@ -186,10 +186,16 @@ FFPROBE_PATH=/opt/homebrew/opt/ffmpeg-full/bin/ffprobe
 uvicorn app.main:app --reload --port 8000
 ```
 
-Talking-head:
+Talking-head (full-frame by default — captions and zooms on the speaker):
 
 ```bash
 curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?theme=tech"
+```
+
+Talking-head with split screen (graphics above, face below):
+
+```bash
+curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?theme=tech&split_screen=true"
 ```
 
 Audio reel:
@@ -212,13 +218,20 @@ python scripts/preview_graphics.py talk.mp4 storage/preview tech
 
 ## HTTP API
 
+Query params on the upload endpoints (`theme`, `split_screen`) are the per-job overrides. Omit a param to keep the default.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/v1/themes` | `paper` · `noir` · `tech` · `ivory` |
-| `POST` | `/api/v1/videos?theme=` | Talking-head → split-layout reel |
+| `POST` | `/api/v1/videos?theme=&split_screen=` | Talking-head reel. Split only when `split_screen=true` |
 | `POST` | `/api/v1/reels?theme=` | Audio → full-canvas reel |
 | `GET` | `/api/v1/jobs/{job_id}` | Status, stage, progress, metrics |
 | `GET` | `/api/v1/jobs/{job_id}/result` | Final MP4 |
+
+| Query param | Endpoints | Default | Values |
+| --- | --- | --- | --- |
+| `theme` | `/videos`, `/reels` | `GRAPHICS_THEME` (`paper`) | `paper` · `noir` · `tech` · `ivory` |
+| `split_screen` | `/videos` | `false` | `true` / `false` — split layout only when `true` |
 
 Job stages: `uploaded` → `validating` → `extracting_audio` → `transcribing` → `repairing_transcript` → `analyzing_editorial` → `generating_captions` → `planning_edits` → `rendering` → `completed`.
 
@@ -234,7 +247,7 @@ Copy `.env.example`. The values that change the picture:
 | `OUTPUT_WIDTH` / `OUTPUT_HEIGHT` / `OUTPUT_FPS` | `1080` / `1920` / `30` | Delivery spec |
 | `MAX_VIDEO_DURATION_SEC` | `0` | `0` = no upload cap |
 | `CAPTION_CHUNK_SECONDS` | `0` | `0` = one caption request for the whole talk |
-| `SPLIT_LAYOUT_ENABLED` | `true` | Graphics panel above the face |
+| `SPLIT_LAYOUT_ENABLED` | `true` | CLI / renderer fallback. The videos API ignores this and only splits when `?split_screen=true` |
 | `SFX_ENABLED` / `SFX_DIR` | `true` / `Sound Effects V4` | Mix under voice |
 | `TRANSCRIPT_REPAIR_LLM_ENABLED` | `true` | Whisper typo pass |
 | `SCENES_LLM_ENABLED` | `true` | Audio-reel scene director |

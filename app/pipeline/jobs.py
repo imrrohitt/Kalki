@@ -41,6 +41,7 @@ class Job:
     source_path: str
     kind: str = "video"
     theme: str = ""
+    split_layout: bool = False
     status: JobStatus = JobStatus.uploaded
     stage: str = JobStatus.uploaded.value
     progress: int = 5

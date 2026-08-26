@@ -50,6 +50,10 @@ async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     theme: str = Query("", description="Motion-graphics theme: paper|noir|tech|ivory"),
+    split_screen: bool = Query(
+        False,
+        description="If true, graphics panel above the speaker. Default is full-frame talking-head.",
+    ),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
@@ -66,6 +70,7 @@ async def upload_video(
 
     job = job_store.create(source_path="")
     job.theme = theme
+    job.split_layout = split_screen
     dest = uploads / f"{job.job_id}{suffix}"
     with dest.open("wb") as out:
         shutil.copyfileobj(file.file, out)
@@ -74,10 +79,12 @@ async def upload_video(
     job.set_stage(JobStatus.uploaded)
     size_mb = dest.stat().st_size / (1024 * 1024)
     logger.info(
-        "[%s] uploaded %s (%.1f MB)",
+        "[%s] uploaded %s (%.1f MB) theme=%s split_screen=%s",
         job.job_id[:8],
         file.filename,
         size_mb,
+        theme or settings.graphics_theme,
+        split_screen,
     )
 
     background_tasks.add_task(get_pipeline().run, job.job_id)
@@ -87,6 +94,7 @@ async def upload_video(
         "status": job.status.value,
         "kind": job.kind,
         "theme": job.theme or settings.graphics_theme,
+        "split_screen": job.split_layout,
     }
 
 
@@ -151,10 +159,13 @@ async def get_job(job_id: str):
         "job_id": job.job_id,
         "status": job.status.value,
         "kind": job.kind,
+        "theme": job.theme or settings.graphics_theme,
         "stage": job.stage,
         "progress": job.progress,
         "metrics": job.metrics,
     }
+    if job.kind == "video":
+        payload["split_screen"] = job.split_layout
     if job.error:
         payload["error"] = job.error
     return payload

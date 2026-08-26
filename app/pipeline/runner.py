@@ -163,6 +163,7 @@ class Pipeline:
                 video_duration=duration,
                 visual=visual,
                 job_id=job_id,
+                split_layout=job.split_layout,
             )
             job.metrics["zoom_count"] = len(edit_plan.zooms)
             job.metrics["sfx_count"] = len(edit_plan.sfx)
@@ -192,6 +193,7 @@ class Pipeline:
                 sfx=edit_plan.sfx,
                 video_duration=duration,
                 theme=job.theme or None,
+                split_layout=job.split_layout,
             )
             job.metrics["graphic_count"] = len(edit_plan.graphics)
             job.metrics["render_time_ms"] = int(
