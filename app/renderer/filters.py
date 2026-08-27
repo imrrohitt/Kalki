@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 
+# Lanczos when covering a 9:16 frame — bilinear makes the 2× height-upscale look soft.
+SCALE_FLAGS = "flags=lanczos+accurate_rnd+full_chroma_int"
+
+
 def escape_drawtext(text: str) -> str:
     text = text.replace("\\", "\\\\")
     text = text.replace(":", "\\:")
@@ -22,11 +26,18 @@ def font_path_for_ffmpeg(path: str) -> str:
     )
 
 
-def vertical_scale_crop_filter(width: int, height: int) -> str:
+def vertical_fit_pad_filter(width: int, height: int) -> str:
+    """Fit the entire source into 9:16. Never crop-zoom the face."""
     return (
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height}"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:"
+        f"force_divisible_by=2:{SCALE_FLAGS},"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+        f"setsar=1"
     )
+
+
+def vertical_scale_crop_filter(width: int, height: int) -> str:
+    return vertical_fit_pad_filter(width, height)
 
 
 def position_xy(position: str) -> tuple[str, str]:

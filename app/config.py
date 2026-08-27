@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     storage_dir: str = "storage"
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
+    # Encode: CRF 16 + medium + 256k audio. Slow looks hung on long clips.
+    x264_preset: str = "medium"
+    x264_crf: int = 16
+    audio_bitrate: str = "256k"
 
     @property
     def font_path(self) -> Path:

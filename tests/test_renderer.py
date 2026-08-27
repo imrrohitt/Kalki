@@ -182,8 +182,8 @@ def test_zoom_is_visible_on_pixels(tmp_path: Path):
         ],
     )
     r, g, b = _top_left_rgb(out, 1.0)
-    # Center-crop zoom must throw away the red corner → white.
-    assert g > 80 and b > 80, f"top-left still red rgb=({r},{g},{b}); zoom filter is a no-op"
+    # Overlay never punches in — the source red corner stays put.
+    assert r > 180 and g < 40 and b < 40, f"source frame was cropped rgb=({r},{g},{b})"
 
 
 def test_split_layout_light_top_canvas(tmp_path: Path):
@@ -267,6 +267,66 @@ def test_split_filtergraph_fits_head_into_bottom_panel():
     assert "SHOULD_BE_IGNORED" not in graph
     assert "vstack=inputs=2" in graph
     assert head_panel_filter(1080, 1200) in graph
+
+
+def test_overlay_keeps_source_resolution(tiny_video: Path, tmp_path: Path):
+    from app.media.probe import probe_video
+
+    out = tmp_path / "same.mp4"
+    FFmpegRenderer(font_path=str(settings.font_path), split_layout=False).render(
+        str(tiny_video),
+        CaptionTimeline(
+            captions=[
+                Caption(
+                    start=0.2,
+                    end=1.4,
+                    text="HELLO",
+                    words=[CaptionWord(text="HELLO", start=0.2, end=1.4, emphasis=True)],
+                )
+            ]
+        ),
+        str(out),
+    )
+    src = probe_video(str(tiny_video))
+    got = probe_video(str(out))
+    assert got.display_width == src.display_width
+    assert got.display_height == src.display_height
+
+
+def test_display_size_swaps_rotated_phone_video():
+    from app.media.probe import VideoInfo
+
+    info = VideoInfo(
+        duration=1.0,
+        width=1920,
+        height=864,
+        fps=30.0,
+        video_codec="h264",
+        has_audio=True,
+        audio_codec="aac",
+        rotation=-90,
+    )
+    assert info.display_width == 864
+    assert info.display_height == 1920
+
+
+def test_encode_keeps_high_quality():
+    args = FFmpegRenderer()._encode_args()
+    assert args[args.index("-crf") + 1] == str(settings.x264_crf)
+    assert int(args[args.index("-crf") + 1]) <= 16
+    assert args[args.index("-preset") + 1] == "medium"
+    assert args[args.index("-b:a") + 1] == "256k"
+
+
+def test_cover_scale_uses_lanczos():
+    from app.renderer.filters import vertical_scale_crop_filter
+
+    vf = vertical_scale_crop_filter(1080, 1920)
+    assert "lanczos" in vf
+    assert "force_original_aspect_ratio=decrease" in vf
+    assert "pad=1080:1920" in vf
+    assert "crop=1080:1920" not in vf
+    assert "increase" not in vf
 
 
 def test_renderer_mixes_sfx(tiny_video: Path, tmp_path: Path):

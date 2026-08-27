@@ -6,7 +6,6 @@ import subprocess
 
 from app.config import settings
 from app.media.probe import probe_video
-from app.renderer.filters import vertical_scale_crop_filter
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +27,7 @@ def detect_head_top(
     """
     times = timestamps or _sample_times(source)
     tops: list[int] = []
-    vf = (
-        f"{vertical_scale_crop_filter(width, height)},"
-        f"scale={_COLS}:{_ROWS},format=gray"
-    )
+    vf = f"scale={_COLS}:{_ROWS},format=gray"
     for t in times:
         raw = _grab_gray(source, t, vf)
         if raw is None:

@@ -11,10 +11,8 @@ from app.media.probe import MediaError, probe_video
 from app.media.subject import detect_head_top
 from app.renderer.ass import write_ass_file
 from app.renderer.canvas import build_full_canvas_filtergraph
-from app.renderer.filters import vertical_scale_crop_filter
 from app.renderer.sfx_mix import build_sfx_mix
 from app.renderer.split import build_split_filtergraph
-from app.renderer.zoom import build_zoom_filtergraph
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +59,25 @@ class FFmpegRenderer:
             .replace(" ", "\\ ")
         )
 
+    def _encode_args(self) -> list[str]:
+        return [
+            "-c:v",
+            "libx264",
+            "-preset",
+            settings.x264_preset,
+            "-crf",
+            str(settings.x264_crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            settings.audio_bitrate,
+            "-movflags",
+            "+faststart",
+            "-shortest",
+        ]
+
     def render(
         self,
         source_video: str,
@@ -79,35 +96,37 @@ class FFmpegRenderer:
         font = Path(self.font_path)
 
         use_split = self.split_layout if split_layout is None else split_layout
+        info = probe_video(source_video)
+        if use_split:
+            out_w, out_h = self.width, self.height
+        else:
+            out_w, out_h = info.display_width, info.display_height
         out = Path(output_path)
         ass_path = out.with_suffix(".ass")
         head_top = None
         if not use_split:
             head_top = detect_head_top(
-                source_video, width=self.width, height=self.height
+                source_video, width=out_w, height=out_h
             )
         write_ass_file(
             caption_timeline,
             str(ass_path),
-            width=self.width,
-            height=self.height,
+            width=out_w,
+            height=out_h,
             font_name="Montserrat",
-            graphics=graphics,
+            graphics=graphics if use_split else [],
             split_layout=use_split,
             video_duration=video_duration,
             theme=theme,
             head_top=head_top,
         )
 
+        _ = zooms
         ass_escaped = self._escape_filter_path(ass_path)
         fonts_dir = self._escape_filter_path(font.parent)
 
-        zoom_graph = None
-        if not use_split:
-            zoom_graph = build_zoom_filtergraph(zooms, self.width, self.height, self.fps)
         cmd = [settings.ffmpeg_path, "-y", "-i", source_video]
 
-        info = probe_video(source_video)
         sfx_files, audio_filter = ([], "")
         if settings.sfx_enabled and sfx:
             sfx_files, audio_filter = build_sfx_mix(
@@ -120,8 +139,8 @@ class FFmpegRenderer:
 
         if use_split:
             graph = build_split_filtergraph(
-                width=self.width,
-                height=self.height,
+                width=out_w,
+                height=out_h,
                 fps=self.fps,
                 ass_escaped=ass_escaped,
                 fonts_dir=fonts_dir,
@@ -142,28 +161,13 @@ class FFmpegRenderer:
                 cmd.extend(["-filter_complex", graph, "-map", "[vout]", "-map", "0:a?"])
         else:
             finish = (
-                f"fps={self.fps},format=yuv420p,"
+                f"setsar=1,format=yuv420p,"
                 f"ass={ass_escaped}:fontsdir={fonts_dir}"
             )
-            if zoom_graph:
-                video_graph = f"{zoom_graph};[vzoom]{finish}[vout]"
-            else:
-                vf = ",".join(
-                    [
-                        vertical_scale_crop_filter(self.width, self.height),
-                        finish,
-                    ]
-                )
-                video_graph = f"[0:v]{vf}[vout]" if audio_filter else ""
+            vf = finish
+            video_graph = f"[0:v]{vf}[vout]" if audio_filter else ""
             if audio_filter:
-                if not zoom_graph:
-                    vf = ",".join(
-                        [
-                            vertical_scale_crop_filter(self.width, self.height),
-                            finish,
-                        ]
-                    )
-                    video_graph = f"[0:v]{vf}[vout]"
+                video_graph = f"[0:v]{vf}[vout]"
                 cmd.extend(
                     [
                         "-filter_complex",
@@ -174,53 +178,22 @@ class FFmpegRenderer:
                         "[aout]",
                     ]
                 )
-            elif zoom_graph:
-                cmd.extend(
-                    [
-                        "-filter_complex",
-                        f"{zoom_graph};[vzoom]{finish}[vout]",
-                        "-map",
-                        "[vout]",
-                        "-map",
-                        "0:a?",
-                    ]
-                )
             else:
-                vf = ",".join(
-                    [
-                        vertical_scale_crop_filter(self.width, self.height),
-                        finish,
-                    ]
-                )
                 cmd.extend(["-vf", vf])
 
-        cmd.extend(
-            [
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "+faststart",
-                "-shortest",
-                output_path,
-            ]
-        )
+        cmd.extend(self._encode_args())
+        cmd.append(output_path)
 
         try:
             logger.info(
-                "ffmpeg %s layout zooms=%s graphics=%s sfx=%s captions=%s",
-                "split" if use_split else "full-frame",
-                0 if use_split else len(zooms or []),
-                len(graphics or []),
+                "ffmpeg %s %sx%s sfx=%s captions=%s crf=%s preset=%s",
+                "split" if use_split else "source-frame",
+                out_w,
+                out_h,
                 len(sfx or []),
                 len(caption_timeline.captions),
+                settings.x264_crf,
+                settings.x264_preset,
             )
             subprocess.run(cmd, capture_output=True, text=True, check=True)
         except FileNotFoundError as exc:
@@ -296,33 +269,17 @@ class FFmpegRenderer:
 
         if audio_duration > 0:
             cmd.extend(["-t", f"{audio_duration:.3f}"])
-        cmd.extend(
-            [
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-                "-shortest",
-                output_path,
-            ]
-        )
+        cmd.extend(self._encode_args())
+        cmd.append(output_path)
         try:
             logger.info(
-                "ffmpeg audio-reel graphics=%s sfx=%s captions=%s duration=%.1fs",
+                "ffmpeg audio-reel graphics=%s sfx=%s captions=%s duration=%.1fs crf=%s preset=%s",
                 len(graphics or []),
                 len(sfx or []),
                 len(caption_timeline.captions),
                 audio_duration,
+                settings.x264_crf,
+                settings.x264_preset,
             )
             subprocess.run(cmd, capture_output=True, text=True, check=True)
         except FileNotFoundError as exc:

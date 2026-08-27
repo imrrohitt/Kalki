@@ -188,7 +188,7 @@ class Pipeline:
                 source_video=job.source_path,
                 caption_timeline=timeline,
                 output_path=str(output_path),
-                zooms=edit_plan.zooms,
+                zooms=[],  # never punch-in the talking head
                 graphics=edit_plan.graphics,
                 sfx=edit_plan.sfx,
                 video_duration=duration,

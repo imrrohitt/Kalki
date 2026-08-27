@@ -1,4 +1,4 @@
-from __future__ import annotations
+from app.renderer.filters import SCALE_FLAGS
 
 
 def split_panel_sizes(height: int) -> tuple[int, int]:
@@ -22,9 +22,9 @@ def head_panel_filter(width: int, head_h: int) -> str:
     """
     return (
         f"split=2[hs][hb];"
-        f"[hb]scale={width}:{head_h}:force_original_aspect_ratio=increase,"
+        f"[hb]scale={width}:{head_h}:force_original_aspect_ratio=increase:{SCALE_FLAGS},"
         f"crop={width}:{head_h},boxblur=22:8[bg];"
-        f"[hs]scale={width}:{head_h}:force_original_aspect_ratio=decrease:force_divisible_by=2[fg];"
+        f"[hs]scale={width}:{head_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:{SCALE_FLAGS}[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1"
     )
 

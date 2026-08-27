@@ -47,6 +47,7 @@ class FasterWhisperProvider:
                 "min_silence_duration_ms": settings.whisper_min_silence_ms,
             }
 
+        logger.info("whisper transcribe started")
         segments_iter, info = model.transcribe(
             audio_path,
             language=None,
@@ -56,7 +57,18 @@ class FasterWhisperProvider:
             vad_filter=settings.whisper_vad_enabled,
             vad_parameters=vad_parameters,
         )
-        segments_list = list(segments_iter)
+        segments_list = []
+        last_log = 0.0
+        for seg in segments_iter:
+            segments_list.append(seg)
+            if seg.end - last_log >= 15.0:
+                logger.info(
+                    "whisper progress %.0fs / ~%.0fs (%s segments)",
+                    seg.end,
+                    getattr(info, "duration", 0.0) or 0.0,
+                    len(segments_list),
+                )
+                last_log = float(seg.end)
 
         segments: list[Segment] = []
         for seg in segments_list:

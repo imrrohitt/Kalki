@@ -178,6 +178,7 @@ def _styled_caption_text(
     theme: D.Theme | None = None,
     overlay_y: int = 360,
     head_top: int = 520,
+    canvas_w: int = 1080,
 ) -> str:
     th = theme or D.get_theme(None)
     layout = layout or ("split" if split else "overlay")
@@ -191,7 +192,7 @@ def _styled_caption_text(
         key=len,
     )
     if layout == "overlay" and longest:
-        usable = D.CANVAS_W - 200
+        usable = max(200, canvas_w - 80)
         body_fs = _fit_fs(longest.upper() if uppercase else longest, body_fs, usable)
         hot_fs = min(hot_fs, body_fs + 22)
         hot_fs = _fit_fs(
@@ -230,9 +231,11 @@ def _styled_caption_text(
     if layout == "full":
         return rf"{{\an8\pos(540,{D.CAPTION_Y_FULL})}}" + anim + body
     clip_bottom = max(overlay_y + 80, head_top - 24)
+    cx = canvas_w // 2
+    margin = max(24, canvas_w // 18)
     return (
-        rf"{{\an8\pos(540,{overlay_y})"
-        rf"\clip(56,16,1024,{clip_bottom})}}"
+        rf"{{\an8\pos({cx},{overlay_y})"
+        rf"\clip({margin},16,{canvas_w - margin},{clip_bottom})}}"
         + anim
         + body
     )
@@ -1532,6 +1535,7 @@ def write_ass_file(
             theme=th,
             overlay_y=overlay_y,
             head_top=clip_head,
+            canvas_w=width,
         )
         lines.append(
             "Dialogue: 5,"

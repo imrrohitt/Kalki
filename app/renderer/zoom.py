@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.editorial.models import ZoomDecision, ZoomEasing, ZoomStyle
+from app.renderer.filters import SCALE_FLAGS
 
 
 def _progress(t0: float, t1: float, var: str, comma: str) -> str:
@@ -220,7 +221,7 @@ def _concat_graph(
     n = len(pieces)
     labels = "".join(f"[b{i}]" for i in range(n))
     parts = [
-        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase:{SCALE_FLAGS},"
         f"crop={width}:{height},split={n}{labels}"
     ]
     concat_in = ""
@@ -233,7 +234,8 @@ def _concat_graph(
         if piece.scale > 1.001:
             x, y = _crop_xy(piece.scale, width, height, piece.anchor_x, piece.anchor_y)
             chain += (
-                f",scale=trunc(iw*{piece.scale:.3f}/2)*2:trunc(ih*{piece.scale:.3f}/2)*2,"
+                f",scale=trunc(iw*{piece.scale:.3f}/2)*2:trunc(ih*{piece.scale:.3f}/2)*2"
+                f":{SCALE_FLAGS},"
                 f"crop={width}:{height}:{x}:{y}"
             )
         chain += f",setsar=1,fps={fps}[s{i}]"

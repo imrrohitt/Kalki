@@ -16,6 +16,17 @@ class VideoInfo:
     video_codec: str | None
     has_audio: bool
     audio_codec: str | None
+    rotation: float = 0.0
+
+    @property
+    def display_width(self) -> int:
+        w, h = _display_wh(self.width, self.height, self.rotation)
+        return w
+
+    @property
+    def display_height(self) -> int:
+        w, h = _display_wh(self.width, self.height, self.rotation)
+        return h
 
 
 @dataclass
@@ -28,6 +39,33 @@ class AudioInfo:
 
 class MediaError(Exception):
     pass
+
+
+def _even(value: int) -> int:
+    return int(value) - (int(value) % 2)
+
+
+def _display_wh(width: int, height: int, rotation: float) -> tuple[int, int]:
+    rot = int(round(abs(float(rotation)))) % 360
+    if rot in (90, 270):
+        width, height = height, width
+    return _even(width), _even(height)
+
+
+def _rotation_from_stream(video: dict) -> float:
+    for item in video.get("side_data_list") or []:
+        if item.get("rotation") is not None:
+            try:
+                return float(item["rotation"])
+            except (TypeError, ValueError):
+                continue
+    tags = video.get("tags") or {}
+    if tags.get("rotate") is not None:
+        try:
+            return float(tags["rotate"])
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
 
 
 def probe_video(path: str) -> VideoInfo:
@@ -58,6 +96,7 @@ def probe_video(path: str) -> VideoInfo:
         video_codec=video.get("codec_name"),
         has_audio=audio is not None,
         audio_codec=audio.get("codec_name") if audio else None,
+        rotation=_rotation_from_stream(video),
     )
 
 
