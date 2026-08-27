@@ -46,7 +46,7 @@ class Pipeline:
             await self.run_audio(job_id)
             return
 
-        job_dir = settings.storage_path / "jobs" / job_id
+        job_dir = job.job_dir
         job_dir.mkdir(parents=True, exist_ok=True)
         audio_path = job_dir / "audio.wav"
         transcript_path = job_dir / "transcript.json"
@@ -213,11 +213,11 @@ class Pipeline:
                 audio_path.unlink()
 
         except Exception as exc:  # noqa: BLE001 - surface as job failure
-            job.set_stage(JobStatus.failed)
             job.error = str(exc)
             job.metrics["total_processing_time_ms"] = int(
                 (time.perf_counter() - t0) * 1000
             )
+            job.set_stage(JobStatus.failed)
             logger.exception("[%s] failed at %s: %s", jid, job.stage, exc)
             (job_dir / "error.json").write_text(
                 json.dumps({"error": str(exc)}, indent=2),
@@ -232,7 +232,7 @@ class Pipeline:
             logger.error("job %s not found; skipping audio reel pipeline", job_id)
             return
 
-        job_dir = settings.storage_path / "jobs" / job_id
+        job_dir = job.job_dir
         job_dir.mkdir(parents=True, exist_ok=True)
         whisper_path = job_dir / "whisper.wav"
         raw_path = job_dir / "transcript.raw.json"
@@ -417,11 +417,11 @@ class Pipeline:
                 whisper_path.unlink()
 
         except Exception as exc:  # noqa: BLE001 - surface as job failure
-            job.set_stage(JobStatus.failed)
             job.error = str(exc)
             job.metrics["total_processing_time_ms"] = int(
                 (time.perf_counter() - t0) * 1000
             )
+            job.set_stage(JobStatus.failed)
             logger.exception("[%s] failed at %s: %s", jid, job.stage, exc)
             (job_dir / "error.json").write_text(
                 json.dumps({"error": str(exc)}, indent=2),

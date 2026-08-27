@@ -1,4 +1,5 @@
 import time
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -109,6 +110,9 @@ def test_upload_job_status_and_result(tmp_path, monkeypatch):
         body = resp.json()
         assert body["split_screen"] is False
         job_id = body["job_id"]
+        uuid.UUID(job_id)
+        assert Path(body["job_dir"]).name == job_id
+        assert body["output_path"].endswith(f"{job_id}/output.mp4")
 
         status = None
         for _ in range(40):
@@ -121,6 +125,8 @@ def test_upload_job_status_and_result(tmp_path, monkeypatch):
         assert status["status"] == "completed", status
         assert status["progress"] == 100
         assert "zoom_count" in status["metrics"]
+        assert Path(body["output_path"]).is_file()
+        assert Path(body["output_path"]).name == "output.mp4"
 
         result = client.get(f"/api/v1/jobs/{job_id}/result")
         assert result.status_code == 200
@@ -275,8 +281,15 @@ def test_videos_query_params_theme_and_split_screen(tmp_path, monkeypatch):
             )
         assert default.status_code == 200
         body = default.json()
+        uuid.UUID(body["job_id"])
         assert body["theme"] == "tech"
         assert body["split_screen"] is False
+        assert body["job_dir"].endswith(body["job_id"])
+        assert body["output_path"] == str(Path(body["job_dir"]) / "output.mp4")
+        job_dir = Path(body["job_dir"])
+        assert job_dir.is_dir()
+        assert (job_dir / "source.mp4").exists()
+        assert (job_dir / "job.json").exists()
 
         job = job_store.get(body["job_id"])
         assert job is not None
@@ -300,6 +313,13 @@ def test_videos_query_params_theme_and_split_screen(tmp_path, monkeypatch):
         job = job_store.get(body["job_id"])
         assert job is not None
         assert job.split_layout is True
+
+        # Same UUID is still readable after the in-memory map is cleared.
+        job_store._jobs.clear()
+        revived = client.get(f"/api/v1/jobs/{body['job_id']}").json()
+        assert revived["job_id"] == body["job_id"]
+        assert revived["split_screen"] is True
+        assert revived["theme"] == "noir"
 
         with video.open("rb") as f:
             bad = client.post(

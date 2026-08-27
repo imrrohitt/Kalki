@@ -8,7 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, Uplo
 from fastapi.responses import FileResponse
 
 from app.config import settings
-from app.pipeline.jobs import JobStatus, job_store
+from app.pipeline.jobs import Job, JobStatus, job_store
 from app.pipeline.runner import Pipeline
 from app.renderer.design import THEMES
 
@@ -35,6 +35,35 @@ def get_pipeline() -> Pipeline:
     if _pipeline is None:
         _pipeline = Pipeline()
     return _pipeline
+
+
+def _job_payload(job: Job, *, include_progress: bool = False) -> dict:
+    payload = {
+        "job_id": job.job_id,
+        "status": job.status.value,
+        "kind": job.kind,
+        "theme": job.theme or settings.graphics_theme,
+        "job_dir": str(job.job_dir),
+        "output_path": str(job.output_file),
+    }
+    if job.kind == "video":
+        payload["split_screen"] = job.split_layout
+    if include_progress:
+        payload["stage"] = job.stage
+        payload["progress"] = job.progress
+        payload["metrics"] = job.metrics
+    if job.error:
+        payload["error"] = job.error
+    return payload
+
+
+def _store_source(job: Job, file: UploadFile, suffix: str) -> None:
+    dest = job.job_dir / f"source{suffix}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+    job.source_path = str(dest)
+    job.set_stage(JobStatus.uploaded)
 
 
 @router.get("/themes")
@@ -65,37 +94,24 @@ async def upload_video(
         )
 
     suffix = Path(file.filename).suffix or ".mp4"
-    uploads = settings.storage_path / "uploads"
-    uploads.mkdir(parents=True, exist_ok=True)
-
     job = job_store.create(source_path="")
     job.theme = theme
     job.split_layout = split_screen
-    dest = uploads / f"{job.job_id}{suffix}"
-    with dest.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
+    _store_source(job, file, suffix)
 
-    job.source_path = str(dest)
-    job.set_stage(JobStatus.uploaded)
-    size_mb = dest.stat().st_size / (1024 * 1024)
+    size_mb = Path(job.source_path).stat().st_size / (1024 * 1024)
     logger.info(
-        "[%s] uploaded %s (%.1f MB) theme=%s split_screen=%s",
+        "[%s] uploaded %s (%.1f MB) theme=%s split_screen=%s dir=%s",
         job.job_id[:8],
         file.filename,
         size_mb,
         theme or settings.graphics_theme,
         split_screen,
+        job.job_dir,
     )
 
     background_tasks.add_task(get_pipeline().run, job.job_id)
-
-    return {
-        "job_id": job.job_id,
-        "status": job.status.value,
-        "kind": job.kind,
-        "theme": job.theme or settings.graphics_theme,
-        "split_screen": job.split_layout,
-    }
+    return _job_payload(job)
 
 
 @router.post("/reels")
@@ -120,33 +136,21 @@ async def upload_audio_reel(
             detail=f"Expected an audio file ({', '.join(sorted(AUDIO_SUFFIXES))})",
         )
 
-    uploads = settings.storage_path / "uploads"
-    uploads.mkdir(parents=True, exist_ok=True)
-
     job = job_store.create(source_path="", kind="audio_reel")
     job.theme = theme
-    dest = uploads / f"{job.job_id}{suffix}"
-    with dest.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
+    _store_source(job, file, suffix)
 
-    job.source_path = str(dest)
-    job.set_stage(JobStatus.uploaded)
-    size_mb = dest.stat().st_size / (1024 * 1024)
+    size_mb = Path(job.source_path).stat().st_size / (1024 * 1024)
     logger.info(
-        "[%s] uploaded audio reel %s (%.1f MB)",
+        "[%s] uploaded audio reel %s (%.1f MB) dir=%s",
         job.job_id[:8],
         file.filename,
         size_mb,
+        job.job_dir,
     )
 
     background_tasks.add_task(get_pipeline().run, job.job_id)
-
-    return {
-        "job_id": job.job_id,
-        "status": job.status.value,
-        "kind": job.kind,
-        "theme": job.theme or settings.graphics_theme,
-    }
+    return _job_payload(job)
 
 
 @router.get("/jobs/{job_id}")
@@ -155,20 +159,7 @@ async def get_job(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    payload = {
-        "job_id": job.job_id,
-        "status": job.status.value,
-        "kind": job.kind,
-        "theme": job.theme or settings.graphics_theme,
-        "stage": job.stage,
-        "progress": job.progress,
-        "metrics": job.metrics,
-    }
-    if job.kind == "video":
-        payload["split_screen"] = job.split_layout
-    if job.error:
-        payload["error"] = job.error
-    return payload
+    return _job_payload(job, include_progress=True)
 
 
 @router.get("/jobs/{job_id}/result")
@@ -176,9 +167,11 @@ async def get_result(job_id: str):
     job = job_store.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != JobStatus.completed or not job.result_path:
+    if job.status != JobStatus.completed:
         raise HTTPException(status_code=409, detail=f"Job not ready: {job.status.value}")
-    path = Path(job.result_path)
+    path = Path(job.result_path) if job.result_path else job.output_file
+    if not path.exists():
+        path = job.output_file
     if not path.exists():
         raise HTTPException(status_code=404, detail="Result file missing")
     return FileResponse(path, media_type="video/mp4", filename=f"{job_id}.mp4")

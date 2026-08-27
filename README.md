@@ -206,6 +206,15 @@ curl -F "file=@talk.wav" "http://127.0.0.1:8000/api/v1/reels?theme=paper"
 
 Poll `GET /api/v1/jobs/{job_id}` until `status` is `completed`, then download `GET /api/v1/jobs/{job_id}/result`.
 
+`POST /videos` and `POST /reels` return a `job_id` UUID immediately. That same UUID is the folder under `storage/jobs/`. The finished MP4 is stored there as `output.mp4`:
+
+```text
+storage/jobs/<job_id>/
+  source.mp4      uploaded file
+  job.json        status
+  output.mp4      rendered reel (when completed)
+```
+
 ### Local, no server
 
 ```bash
@@ -225,8 +234,8 @@ Query params on the upload endpoints (`theme`, `split_screen`) are the per-job o
 | `GET` | `/api/v1/themes` | `paper` · `noir` · `tech` · `ivory` |
 | `POST` | `/api/v1/videos?theme=&split_screen=` | Talking-head reel. Split only when `split_screen=true` |
 | `POST` | `/api/v1/reels?theme=` | Audio → full-canvas reel |
-| `GET` | `/api/v1/jobs/{job_id}` | Status, stage, progress, metrics |
-| `GET` | `/api/v1/jobs/{job_id}/result` | Final MP4 |
+| `GET` | `/api/v1/jobs/{job_id}` | Status, stage, progress, `job_dir`, `output_path` |
+| `GET` | `/api/v1/jobs/{job_id}/result` | Final MP4 from `storage/jobs/{job_id}/output.mp4` |
 
 | Query param | Endpoints | Default | Values |
 | --- | --- | --- | --- |
