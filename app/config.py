@@ -27,7 +27,8 @@ class Settings(BaseSettings):
     caption_font_path: str = "assets/fonts/Montserrat-Bold.ttf"
     # Max source length in seconds. 0 disables the duration check.
     max_video_duration_sec: float = 0.0
-    caption_chunk_seconds: float = 0.0
+    # 0 = one LLM call for the whole video (often collapses the tail into one caption).
+    caption_chunk_seconds: float = 18.0
     output_width: int = 1080
     output_height: int = 1920
     output_fps: int = 30

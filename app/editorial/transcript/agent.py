@@ -35,9 +35,11 @@ Whisper ASR is noisy. Your job is to recover what the speaker actually said.
 
 Rules:
 - Keep the same meaning, order, and number of sentences.
+- If ASR is Hindi or Hinglish, write a faithful English sentence (same meaning). If it is already English, keep it English.
 - Fix spelling, grammar, and technical terms (RAKA→RAG, fine tunning→fine-tuning).
 - Do not invent facts, names, numbers, or claims that are not in the ASR.
 - Do not drop sentences. Do not merge two segments into one.
+- Never leave Devanagari in the repaired text.
 - Return one cleaned string per segment_id.
 
 Call submit_transcript_repair ONCE with JSON:

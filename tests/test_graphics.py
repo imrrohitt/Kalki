@@ -146,6 +146,79 @@ def test_ass_split_includes_motion_and_seam_captions(tmp_path):
     assert r"\p1" in text
     assert r"\clip(" in text
     assert "GShape" not in text or "GLine" in text
+    assert r"\fs112" in text
+    assert r"\fscx124" in text or r"\fscy124" in text
+    assert r"\alpha&HFF&" in text
+
+
+def test_overlay_emphasis_is_bigger_and_pops(tmp_path):
+    from app.captions.models import Caption, CaptionTimeline, CaptionWord
+    from app.renderer.ass import write_ass_file
+
+    path = tmp_path / "kinetic.ass"
+    write_ass_file(
+        CaptionTimeline(
+            captions=[
+                Caption(
+                    start=0.2,
+                    end=1.8,
+                    text="Why RAG",
+                    words=[
+                        CaptionWord(text="Why", start=0.2, end=0.6),
+                        CaptionWord(text="RAG", start=0.6, end=1.8, emphasis=True),
+                    ],
+                )
+            ]
+        ),
+        str(path),
+        split_layout=False,
+        video_duration=2.0,
+        theme="tech",
+    )
+    text = path.read_text()
+    assert r"\fs72" in text
+    assert r"\fs94" in text
+    assert r"\an8\pos(540," in text
+    assert r"\clip(" in text
+    assert r"\t(" in text
+    assert "WHY" in text
+    assert "RAG" in text
+    # Emphasis uses the theme accent, not the body white.
+    assert r"\c&H00FFC94F&" in text
+
+
+def test_overlay_captions_sit_above_head_and_wrap(tmp_path):
+    from app.captions.models import Caption, CaptionTimeline, CaptionWord
+    from app.renderer.ass import write_ass_file
+
+    path = tmp_path / "above.ass"
+    write_ass_file(
+        CaptionTimeline(
+            captions=[
+                Caption(
+                    start=0.2,
+                    end=2.0,
+                    text="And Follow Compliance Like GDPR",
+                    words=[
+                        CaptionWord(text="And", start=0.2, end=0.4),
+                        CaptionWord(text="Follow", start=0.4, end=0.7),
+                        CaptionWord(text="Compliance", start=0.7, end=1.2),
+                        CaptionWord(text="Like", start=1.2, end=1.5),
+                        CaptionWord(text="GDPR", start=1.5, end=2.0, emphasis=True),
+                    ],
+                )
+            ]
+        ),
+        str(path),
+        split_layout=False,
+        video_duration=2.0,
+        head_top=480,
+    )
+    text = path.read_text()
+    dialogue = [ln for ln in text.splitlines() if ln.startswith("Dialogue: 5,")][0]
+    assert r"\an8\pos(540,96)" in dialogue
+    assert r"\N" in dialogue
+    assert "GDPR" in dialogue
 
 
 def test_short_headline_stays_on_one_line(tmp_path):

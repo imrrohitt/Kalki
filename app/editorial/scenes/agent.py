@@ -39,6 +39,11 @@ Do not leave the lower half empty. Do not design a thin title card.
 
 You complete the job yourself. Do not ask questions.
 
+Language law (non-negotiable):
+- Every headline, kicker, bullet, chip, and node label MUST be English.
+- ASR may be Hindi, Hinglish, or mixed. Translate the idea into English scene copy.
+- Never print Devanagari or Hinglish filler. Keep technical terms in English (RAG, LLM, GDPR).
+
 ## What a SCENE is
 A scene is not a caption. It is a diagram of the idea being spoken in that window:
 - TOP: kicker + a short headline (what this moment is about).
@@ -200,6 +205,7 @@ class SceneDirectorAgent:
         agent = self._build_agent([submit_scenes])
         prompt = (
             "Build FULL-FRAME scenes for this window of an audio-only Reel. "
+            "ASR may be Hindi or Hinglish — every headline, node, and line is English. "
             "Every scene must fill 1080x1920: headline, 3-5 boxed nodes with "
             "dotted connectors, and 3-5 supporting lines. Never two bullets only. "
             "First window opens with a HOOK. Structure what they said — do not paste ASR. "

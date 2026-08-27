@@ -62,19 +62,9 @@ class EditorialIntelligenceEngine:
         split_layout: bool | None = None,
     ) -> EditTimeline:
         jid = job_id[:8]
-        use_split = (
-            settings.split_layout_enabled if split_layout is None else split_layout
-        )
-        if use_split:
-            zooms = []
-            logger.info("[%s] zooms: skipped (split layout keeps the full face)", jid)
-        else:
-            zooms = self.zoom_engine.decide(
-                analysis,
-                video_duration=video_duration,
-                visual=visual,
-            )
-            logger.info("[%s] zooms: %s", jid, len(zooms))
+        _ = split_layout
+        zooms = []
+        logger.info("[%s] zooms: off", jid)
         broll = await self.broll_agent.plan(analysis)
         cuts = await self.cut_agent.plan(analysis)
         graphics = await self.graphics_agent.plan(

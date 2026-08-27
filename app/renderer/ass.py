@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from app.captions.heuristic import explode_caption_timeline
 from app.captions.models import Caption, CaptionTimeline, CaptionWord
 from app.editorial.models import GraphicBeat, GraphicBullet, GraphicNode
 from app.renderer import design as D
@@ -26,65 +27,145 @@ def _escape_ass(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-def _lines_from_caption(caption: Caption, *, uppercase: bool, max_chars: int = 22) -> list[str]:
-    display = (caption.text or "").replace("\\n", "\n").strip()
-    if uppercase:
-        display = display.upper()
-    if "\n" in display:
-        parts = [p.strip() for p in display.split("\n") if p.strip()]
-        return parts[:2]
-    words = display.split()
+def _caption_words(caption: Caption) -> list[CaptionWord]:
+    if caption.words:
+        return list(caption.words)
+    display = (caption.text or "").replace("\\n", " ").strip()
+    return [
+        CaptionWord(text=token, start=caption.start, end=caption.end)
+        for token in display.split()
+        if token.strip()
+    ]
+
+
+def _wrap_caption_words(
+    caption: Caption, *, max_chars: int, max_lines: int = 3
+) -> list[list[CaptionWord]]:
+    """Greedy wrap so a line never runs off the 1080-wide frame."""
+    words = _caption_words(caption)
     if not words:
-        words = [w.text.upper() if uppercase else w.text for w in caption.words]
-    joined = " ".join(words)
-    if len(joined) <= max_chars or len(words) <= 2:
-        return [joined]
-    mid = max(1, (len(words) + 1) // 2)
-    return [" ".join(words[:mid]), " ".join(words[mid:])]
+        return []
+    lines: list[list[CaptionWord]] = []
+    current: list[CaptionWord] = []
+    for word in words:
+        trial = " ".join(w.text for w in current + [word])
+        if current and len(trial) > max_chars:
+            lines.append(current)
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        lines.append(current)
+    # If we overflow max_lines, widen the wrap until it fits, then the
+    # font-size fitter shrinks type so nothing runs off the frame.
+    if len(lines) > max_lines:
+        for chars in range(max_chars + 2, max_chars + 18, 2):
+            wider: list[list[CaptionWord]] = []
+            cur: list[CaptionWord] = []
+            for word in words:
+                trial = " ".join(w.text for w in cur + [word])
+                if cur and len(trial) > chars:
+                    wider.append(cur)
+                    cur = [word]
+                else:
+                    cur.append(word)
+            if cur:
+                wider.append(cur)
+            if len(wider) <= max_lines:
+                return [line for line in wider if line]
+        lines = wider
+    return [line for line in lines if line]
 
 
-def _emphasis_set(caption: Caption) -> set[str]:
-    return {
-        w.text.upper().strip(".,!?")
-        for w in caption.words
-        if w.emphasis
-    }
+def _word_delay_ms(caption: Caption, word: CaptionWord, index: int) -> int:
+    delta = int(round((float(word.start) - float(caption.start)) * 1000))
+    if delta >= 40:
+        return min(max(delta, 0), 900)
+    return min(index * 55, 360)
 
 
-def _style_line(
-    line: str,
-    hot: set[str],
+def _word_motion(
+    *,
+    delay: int,
+    emphasis: bool,
+    accent: str,
+    body_color: str,
+    body_fs: int,
+    hot_fs: int,
+    peak: int = 124,
+) -> str:
+    """Per-word pop. Emphasis lands bigger, with a bounce, in the accent color."""
+    if emphasis:
+        t1 = delay
+        t2 = delay + 140
+        t3 = delay + 260
+        return (
+            rf"{{\fs{hot_fs}\b1\c{accent}&\fscx78\fscy78\alpha&HFF&"
+            rf"\t({t1},{t2},0.35,\alpha&H00&\fscx{peak}\fscy{peak})"
+            rf"\t({t2},{t3},0.5,\fscx100\fscy100)}}"
+        )
+    t1 = delay
+    t2 = delay + 120
+    return (
+        rf"{{\fs{body_fs}\c{body_color}&\fscx88\fscy88\alpha&HFF&"
+        rf"\t({t1},{t2},0.4,\alpha&H00&\fscx100\fscy100)}}"
+    )
+
+
+def _kinetic_line(
+    line_words: list[CaptionWord],
+    caption: Caption,
     *,
     uppercase: bool,
     accent: str,
-    body_color: str = "&H00FFFFFF",
+    body_color: str,
+    body_fs: int,
+    hot_fs: int,
+    index_offset: int,
+    peak: int = 124,
 ) -> str:
-    parts = []
-    tokens = line.upper().split() if uppercase else line.split()
-    for token in tokens:
-        clean = token.strip(".,!?").upper()
-        safe = _escape_ass(token)
-        if clean in hot:
-            parts.append(rf"{{\c{accent}&\b1}}{safe}{{\c{body_color}&\b0}}")
-        else:
-            parts.append(safe)
+    parts: list[str] = []
+    for i, word in enumerate(line_words):
+        token = word.text.upper() if uppercase else word.text
+        delay = _word_delay_ms(caption, word, index_offset + i)
+        parts.append(
+            _word_motion(
+                delay=delay,
+                emphasis=word.emphasis,
+                accent=accent,
+                body_color=body_color,
+                body_fs=body_fs,
+                hot_fs=hot_fs,
+                peak=peak,
+            )
+            + _escape_ass(token)
+        )
     return " ".join(parts)
 
 
+# Overlay / split / full: (body fs, emphasis fs). Overlay sits above the
+# head so type is smaller and wrap is tighter; emphasis still reads bigger.
+_CAPTION_FS = {
+    "overlay": (72, 94),
+    "split": (78, 112),
+    "full": (70, 102),
+}
+
+
+def _overlay_caption_y(head_top: int, height: int = 1920) -> int:
+    """Top of the caption block, in the empty wall space above the head."""
+    _ = height
+    return max(64, min(96, head_top // 5))
+
+
 def _caption_pop(uppercase: bool, *, split: bool = False) -> str:
+    # Exit fade only — word pops handle the entrance so the line does not
+    # compound a second scale animation.
     if uppercase:
-        return (
-            r"{\fad(80,90)"
-            r"\t(0,130,\fscx128\fscy128)"
-            r"\t(130,230,\fscx100\fscy100)}"
-        )
+        return r"{\fad(0,110)}"
     if split:
-        # Quick pop-in so the caption lands with the voice.
-        return (
-            r"{\fad(60,80)\fscx88\fscy88"
-            r"\t(0,150,0.35,\fscx100\fscy100)}"
-        )
-    return r"{\fad(90,80)}"
+        return r"{\fad(0,90)}"
+    return r"{\fad(0,100)}"
 
 
 def _styled_caption_text(
@@ -95,35 +176,66 @@ def _styled_caption_text(
     layout: str = "overlay",
     seam_y: int = 720,
     theme: D.Theme | None = None,
+    overlay_y: int = 360,
+    head_top: int = 520,
 ) -> str:
     th = theme or D.get_theme(None)
     layout = layout or ("split" if split else "overlay")
     stacked = layout in {"split", "full"}
-    hot = _emphasis_set(caption)
-    lines = _lines_from_caption(
-        caption, uppercase=uppercase, max_chars=14 if stacked else 22
+    body_fs, hot_fs = _CAPTION_FS.get(layout, _CAPTION_FS["overlay"])
+    max_chars = 14 if stacked else 16
+    wrapped = _wrap_caption_words(caption, max_chars=max_chars, max_lines=3)
+    longest = max(
+        (" ".join(w.text for w in line) for line in wrapped),
+        default="",
+        key=len,
     )
+    if layout == "overlay" and longest:
+        usable = D.CANVAS_W - 200
+        body_fs = _fit_fs(longest.upper() if uppercase else longest, body_fs, usable)
+        hot_fs = min(hot_fs, body_fs + 22)
+        hot_fs = _fit_fs(
+            max((w.text for line in wrapped for w in line if w.emphasis), default="W"),
+            hot_fs,
+            usable,
+        )
     if layout == "full":
         accent = th.accent
         body_color = th.ink if th.name in {"paper", "ivory"} else "&H00FFFFFF"
-    elif layout == "split":
+    else:
         accent = th.caption_emphasis
         body_color = "&H00FFFFFF"
-    else:
-        accent = "&H0000D7FF"
-        body_color = "&H00FFFFFF"
-    body = r"\N".join(
-        _style_line(
-            line, hot, uppercase=uppercase, accent=accent, body_color=body_color
+    peak = 112 if layout == "overlay" else 124
+    chunks: list[str] = []
+    offset = 0
+    for line_words in wrapped:
+        chunks.append(
+            _kinetic_line(
+                line_words,
+                caption,
+                uppercase=uppercase,
+                accent=accent,
+                body_color=body_color,
+                body_fs=body_fs,
+                hot_fs=hot_fs,
+                index_offset=offset,
+                peak=peak,
+            )
         )
-        for line in lines
-    )
+        offset += len(line_words)
+    body = r"\N".join(chunks)
     anim = _caption_pop(uppercase, split=stacked)
     if layout == "split":
         return rf"{{\an8\pos(540,{seam_y + 10})}}" + anim + body
     if layout == "full":
         return rf"{{\an8\pos(540,{D.CAPTION_Y_FULL})}}" + anim + body
-    return anim + body
+    clip_bottom = max(overlay_y + 80, head_top - 24)
+    return (
+        rf"{{\an8\pos(540,{overlay_y})"
+        rf"\clip(56,16,1024,{clip_bottom})}}"
+        + anim
+        + body
+    )
 
 
 def _dedupe_overlaps(captions: list[Caption]) -> list[Caption]:
@@ -1322,9 +1434,9 @@ def _graphic_styles(th: D.Theme) -> list[str]:
 def _styles(*, layout: str, font_name: str, th: D.Theme) -> list[str]:
     if layout == "overlay":
         return [
-            f"Style: Default,{font_name},96,"
+            f"Style: Default,{font_name},72,"
             f"&H00FFFFFF,&H0000FFFF,&H00101010,&H80000000,"
-            f"-1,0,0,0,100,100,1.6,0,1,6,2,2,80,80,280,1"
+            f"-1,0,0,0,100,100,1.2,0,1,6,2,8,72,72,64,1"
         ]
     if layout == "full":
         light = th.name in {"paper", "ivory"}
@@ -1360,11 +1472,13 @@ def write_ass_file(
     layout: str | None = None,
     video_duration: float = 0.0,
     theme: str | D.Theme | None = None,
+    head_top: int | None = None,
 ) -> str:
     th = theme if isinstance(theme, D.Theme) else D.get_theme(theme)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = layout or ("split" if split_layout else "overlay")
+    timeline = explode_caption_timeline(timeline)
 
     lines = [
         "[Script Info]",
@@ -1406,6 +1520,8 @@ def write_ass_file(
 
     uppercase = mode == "overlay"
     seam_y = split_panel_sizes(height)[0] if mode == "split" else 960
+    overlay_y = _overlay_caption_y(head_top or int(height * 0.30), height)
+    clip_head = head_top or overlay_y + 80
     for cap in _dedupe_overlaps(list(timeline.captions)):
         text = _styled_caption_text(
             cap,
@@ -1414,6 +1530,8 @@ def write_ass_file(
             layout=mode,
             seam_y=seam_y,
             theme=th,
+            overlay_y=overlay_y,
+            head_top=clip_head,
         )
         lines.append(
             "Dialogue: 5,"

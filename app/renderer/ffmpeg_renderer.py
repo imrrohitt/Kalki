@@ -8,6 +8,7 @@ from app.captions.models import CaptionTimeline
 from app.config import settings
 from app.editorial.models import GraphicBeat, SfxHit, ZoomDecision
 from app.media.probe import MediaError, probe_video
+from app.media.subject import detect_head_top
 from app.renderer.ass import write_ass_file
 from app.renderer.canvas import build_full_canvas_filtergraph
 from app.renderer.filters import vertical_scale_crop_filter
@@ -80,6 +81,11 @@ class FFmpegRenderer:
         use_split = self.split_layout if split_layout is None else split_layout
         out = Path(output_path)
         ass_path = out.with_suffix(".ass")
+        head_top = None
+        if not use_split:
+            head_top = detect_head_top(
+                source_video, width=self.width, height=self.height
+            )
         write_ass_file(
             caption_timeline,
             str(ass_path),
@@ -90,6 +96,7 @@ class FFmpegRenderer:
             split_layout=use_split,
             video_duration=video_duration,
             theme=theme,
+            head_top=head_top,
         )
 
         ass_escaped = self._escape_filter_path(ass_path)

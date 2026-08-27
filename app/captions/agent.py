@@ -17,7 +17,11 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app.asr import known_terms_in, stabilize_copy
-from app.captions.heuristic import heuristic_caption_timeline
+from app.captions.heuristic import (
+    explode_caption_timeline,
+    heuristic_caption_timeline,
+    packs_for_words,
+)
 from app.captions.models import CaptionTimeline
 from app.captions.validation import format_validation_error, validate_caption_timeline
 from app.config import settings
@@ -33,24 +37,40 @@ CAPTION_INSTRUCTION = """You are CaptionAgent, an autonomous Reels caption edito
 
 Complete the task yourself. Do not ask the user questions.
 
-The word list is ASR. It may be misspelled or the speaker may have misspoken. You do NOT put raw model tokens on screen.
+The word list is ASR. It may be English, Hindi, Hinglish (Hindi in Latin letters),
+or mixed. Tokens may be misspelled. You do NOT put raw ASR on screen.
+
+Language law (non-negotiable):
+- Every on-screen `text` value MUST be fluent English. Title Case.
+- If ASR is Hindi or Hinglish, TRANSLATE the meaning into natural English captions.
+  "aapko data secure karna hai" → "You Need To\\nSecure Data"
+  "pehla step yeh hai" → "The First Step"
+- Never print Devanagari. Never print Hinglish filler (hai, hain, karna, aapko, toh, yeh, woh, ka, ki, ke, mein, se).
+- Keep technical terms in English (RAG, LLM, GDPR, Fine-tuning, LoRA).
+- Reuse the speaker's intent and examples. Do not invent claims they did not make.
 
 Workflow:
-1. Read numbered ASR words (timing only).
-2. Group them into short captions by meaning (usually 2-4 words).
-3. WRITE the on-screen `text` yourself: correct English, correct technical spelling.
+1. Read numbered ASR words (timing only — they may be any language).
+2. Group them into short captions by meaning (usually 2-4 English words).
+3. WRITE the on-screen `text` yourself in English.
 4. Call submit_caption_groups once with JSON.
 5. If ok=false, fix and submit again.
 
+Duration law (non-negotiable):
+- Each caption is 2–4 English words and typically 1–3 seconds on screen.
+- NEVER dump remaining speech into one caption. If many words remain, emit many short groups.
+- A caption must not cover more than ~6 spoken words or ~4 seconds.
+- Cover the whole chunk with a stream of short groups so new lines keep appearing.
+
 Display text rules:
-- `text` is the published caption, not a join of ASR tokens.
+- `text` is the published English caption, not a join of ASR tokens.
 - Fix slips: RAKA→RAG, fine tunning→Fine-tuning, lora→LoRA, destillation→distillation.
-- Keep the same meaning as those timed words. Do not invent extra claims.
+- Keep the same meaning as those timed words.
 - Title Case. Max 2 lines, use \\n. Each line ~12–20 characters.
 - No emojis, hashtags. ? is OK.
 - Keep phrases together: Fine-tuning, RAG, AI interviews, domain data, LLM.
-- emphasis_id: 0 or 1 word id per caption (payload words that mean RAG, LLM, AI, Fine-tuning, DATA).
-- ids must be consecutive, cover every word in order, no duplicates, no skips.
+- emphasis_id: 0 or 1 word id per caption (the payload word that names RAG, LLM, AI, Fine-tuning, DATA).
+- ids must be consecutive, cover every ASR word in order, no duplicates, no skips.
 
 submit_caption_groups JSON:
 {
@@ -113,6 +133,151 @@ def _chunk_words(words: list[Word], chunk_seconds: float = 18.0) -> list[tuple[i
     return chunks
 
 
+def _has_devanagari(text: str) -> bool:
+    return any("\u0900" <= ch <= "\u097f" for ch in text)
+
+
+def _display_tokens(text: str) -> list[str]:
+    cleaned = stabilize_copy(text)
+    return [tok for tok in cleaned.replace("\n", " ").split() if tok]
+
+
+def _timed_english_words(
+    text: str,
+    group_words: list[Word],
+    *,
+    hot_asr: str | None,
+) -> list[dict[str, Any]]:
+    """Map English caption tokens onto the spoken time span (ASR may be Hindi)."""
+    tokens = _display_tokens(text)
+    if not tokens:
+        tokens = [stabilize_copy(w.word) or w.word for w in group_words]
+        tokens = [t for t in tokens if t]
+    if not tokens:
+        return []
+    t0 = float(group_words[0].start)
+    t1 = max(float(group_words[-1].end), t0 + 0.25)
+    n = len(tokens)
+    span = max(t1 - t0, 0.08 * n)
+    hot = (hot_asr or "").lower().strip(".,!?")
+    out: list[dict[str, Any]] = []
+    for i, tok in enumerate(tokens):
+        start = t0 + span * i / n
+        end = t0 + span * (i + 1) / n
+        needle = tok.lower().strip(".,!?")
+        emphasis = bool(hot) and (
+            needle == hot or hot in needle or needle in hot
+        )
+        out.append(
+            {
+                "text": tok,
+                "start": start,
+                "end": max(end, start + 0.05),
+                "emphasis": emphasis,
+            }
+        )
+    if hot and not any(w["emphasis"] for w in out):
+        # Translated line: punch the last content word if ASR hot-term did not match.
+        out[-1]["emphasis"] = True
+    return out
+
+
+def _english_covers_span(text: str, n_asr: int) -> bool:
+    tokens = _display_tokens(text)
+    if n_asr <= 6:
+        return True
+    return len(tokens) >= max(2, n_asr // 4)
+
+
+def _allocate_token_counts(n_tokens: int, weights: list[int]) -> list[int]:
+    total = sum(weights) or 1
+    raw = [n_tokens * w / total for w in weights]
+    counts = [int(x) for x in raw]
+    remainder = n_tokens - sum(counts)
+    order = sorted(range(len(weights)), key=lambda i: raw[i] - counts[i], reverse=True)
+    for i in range(max(0, remainder)):
+        counts[order[i % len(weights)]] += 1
+    return counts
+
+
+def _caption_dict(
+    pack: list[Word],
+    text: str,
+    *,
+    position: str,
+    hot_asr: str | None,
+) -> dict[str, Any]:
+    return {
+        "start": pack[0].start,
+        "end": max(pack[-1].end, pack[0].start + 0.25),
+        "text": text,
+        "position": position or "bottom_center",
+        "animation": "pop",
+        "words": _timed_english_words(text, pack, hot_asr=hot_asr),
+    }
+
+
+def _hot_asr_in_pack(pack: list[Word], hot_asr: str | None) -> str | None:
+    if not hot_asr:
+        return None
+    needle = hot_asr.lower().strip(".,!?")
+    for src in pack:
+        token = src.word.lower().strip(".,!?")
+        if token == needle or needle in token or token in needle:
+            return hot_asr
+    return None
+
+
+def _captions_from_pack_splits(
+    packs: list[list[Word]],
+    text: str,
+    *,
+    position: str,
+    hot_asr: str | None,
+) -> list[dict[str, Any]]:
+    if len(packs) == 1:
+        return [
+            _caption_dict(packs[0], text, position=position, hot_asr=hot_asr)
+        ]
+    tokens = _display_tokens(text) if _english_covers_span(text, sum(len(p) for p in packs)) else []
+    captions: list[dict[str, Any]] = []
+    if tokens:
+        counts = _allocate_token_counts(len(tokens), [len(p) for p in packs])
+        idx = 0
+        for pack, count in zip(packs, counts):
+            piece = tokens[idx : idx + count]
+            idx += count
+            pack_text = (
+                " ".join(piece)
+                if piece
+                else stabilize_copy(" ".join(w.word for w in pack))
+            )
+            if not pack_text or _has_devanagari(pack_text):
+                continue
+            captions.append(
+                _caption_dict(
+                    pack,
+                    pack_text,
+                    position=position,
+                    hot_asr=_hot_asr_in_pack(pack, hot_asr),
+                )
+            )
+        return captions
+    for pack in packs:
+        pack_text = stabilize_copy(" ".join(w.word for w in pack))
+        if not pack_text or _has_devanagari(pack_text):
+            continue
+        captions.append(
+            _caption_dict(
+                pack,
+                pack_text,
+                position=position,
+                hot_asr=_hot_asr_in_pack(pack, hot_asr),
+            )
+        )
+    return captions
+
+
 def _captions_from_ids(
     groups: list[dict[str, Any]],
     source_words: list[Word],
@@ -150,46 +315,34 @@ def _captions_from_ids(
         text = stabilize_copy(str(group.get("text") or " ".join(w.word for w in group_words)))
         if not text:
             text = stabilize_copy(" ".join(w.word for w in group_words))
-        captions.append(
-            {
-                "start": group_words[0].start,
-                "end": max(group_words[-1].end, group_words[0].start + 0.25),
-                "text": text,
-                "position": group.get("position") or "bottom_center",
-                "animation": "pop",
-                "words": [
-                    {
-                        "text": stabilize_copy(w.word) or w.word,
-                        "start": w.start,
-                        "end": w.end,
-                        "emphasis": used[local_i] == emphasis_local
-                        if emphasis_local is not None
-                        else False,
-                    }
-                    for local_i, w in enumerate(group_words)
-                ],
-            }
+        hot_asr = None
+        if emphasis_local is not None:
+            for local_i, src in enumerate(group_words):
+                if used[local_i] == emphasis_local:
+                    hot_asr = stabilize_copy(src.word) or src.word
+                    break
+        position = group.get("position") or "bottom_center"
+        captions.extend(
+            _captions_from_pack_splits(
+                packs_for_words(group_words),
+                text,
+                position=position,
+                hot_asr=hot_asr,
+            )
         )
     if cursor < len(source_words):
         leftover = source_words[cursor:]
-        captions.append(
-            {
-                "start": leftover[0].start,
-                "end": leftover[-1].end,
-                "text": stabilize_copy(" ".join(w.word for w in leftover)),
-                "position": "bottom_center",
-                "animation": "pop",
-                "words": [
-                    {
-                        "text": stabilize_copy(w.word) or w.word,
-                        "start": w.start,
-                        "end": w.end,
-                        "emphasis": False,
-                    }
-                    for w in leftover
-                ],
-            }
-        )
+        leftover_text = stabilize_copy(" ".join(w.word for w in leftover))
+        # Do not put leftover Hindi/Devanagari on screen; English groups already cover meaning.
+        if leftover_text and not _has_devanagari(leftover_text):
+            captions.extend(
+                _captions_from_pack_splits(
+                    packs_for_words(leftover),
+                    leftover_text,
+                    position="bottom_center",
+                    hot_asr=None,
+                )
+            )
     return captions
 
 
@@ -252,7 +405,7 @@ class CaptionAgentService:
         return LlmAgent(
             name="caption_agent",
             model=self._lite_llm,
-            description="Groups transcript words into short vertical-video captions.",
+            description="Turns ASR (any language) into short English vertical-video captions.",
             instruction=CAPTION_INSTRUCTION,
             tools=tools,
             generate_content_config=types.GenerateContentConfig(
@@ -346,9 +499,12 @@ class CaptionAgentService:
 
         agent = self._build_agent([submit_caption_groups])
         prompt = (
-            "Write captions for this ASR chunk. Timing from ids. "
-            "On-screen text is YOUR rewrite — correct spelling, not raw ASR. "
-            "Cover every word. Call submit_caption_groups once.\n\n"
+            "Write English captions for this ASR chunk. Timing from ids. "
+            "ASR may be Hindi, Hinglish, or English — on-screen `text` is always English. "
+            "Translate meaning; keep technical terms (RAG, LLM, GDPR). "
+            "Never print Devanagari or Hinglish filler. Cover every id. "
+            "Each caption 2-4 words, 1-3 seconds. Never one caption for the rest of the talk. "
+            "Call submit_caption_groups once.\n\n"
             + json.dumps(payload, ensure_ascii=False)
         )
         final_text = await self._run_agent(
@@ -436,7 +592,8 @@ class CaptionAgentService:
                 all_captions.extend(captions)
 
             data = {"version": "1.0", "style": "dynamic_social", "captions": all_captions}
-            return validate_caption_timeline(data, video_duration)
+            timeline = validate_caption_timeline(data, video_duration)
+            return explode_caption_timeline(timeline)
         except Exception as exc:
             logger.warning(
                 "[%s] caption LLM failed (%s); using heuristic grouping",

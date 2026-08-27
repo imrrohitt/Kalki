@@ -38,6 +38,12 @@ The TOP 1080×720 px is YOUR infographic. The bottom is a talking head. Captions
 
 You complete the job yourself. Do not ask questions.
 
+Language law (non-negotiable):
+- Every title, kicker, bullet, chip, node label, and subtitle MUST be English.
+- ASR may be Hindi, Hinglish, or mixed. Translate the meaning into English slide copy.
+- Never print Devanagari or Hinglish filler (hai, karna, aapko, toh, yeh).
+- Keep technical terms in English (RAG, LLM, GDPR, Fine-tuning).
+
 ## What the cards must do
 - Each card explains WHAT THE SPEAKER IS SAYING in that time window. Not a generic AI poster.
 - Rewrite as slide copy (headline + 1–2 bullets). Do not paste the transcript.
@@ -350,6 +356,7 @@ class GraphicsAgent:
         agent = self._build_agent([submit_graphics])
         prompt = (
             "Write infographic cards for THIS time window only. "
+            "ASR may be Hindi or Hinglish — all card copy must be English. "
             "Match what is said at each timestamp. Correct ASR/misspeaks. "
             "Do not invent facts. Max 2 bullets. vs_split has no bullets. "
             f"Video duration={duration:.2f}s. Call submit_graphics once.\n\n"
