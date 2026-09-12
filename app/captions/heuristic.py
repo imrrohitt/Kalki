@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from app.asr import fix_asr_text, stabilize_copy
-from app.captions.models import Caption, CaptionTimeline, CaptionWord
+from app.captions.copy import caption_spoken_case
+from app.captions.models import Caption, CaptionTimeline, CaptionTreatment, CaptionWord
 from app.captions.validation import validate_caption_timeline
 from app.transcription.models import Transcript, Word
+
+_SPECIAL = {"oval", "blob", "underline"}
+_SPECIAL_GAP = 10.0
 
 # One on-screen group. Longer LLM dumps freeze the last line for the rest of the video.
 MAX_CAPTION_WORDS = 6
@@ -15,6 +19,7 @@ _KEEP_PHRASES = (
     "fine-tuning",
     "rag system",
     "raka system",
+    "ai engineer",
     "ai interviews",
     "domain data",
     "existing llm",
@@ -33,8 +38,14 @@ _EMPHASIS = {
     "fine-tuning",
     "tuning",
     "ai",
+    "engineer",
     "cost",
     "documents",
+    "gdpr",
+    "creator",
+    "interviews",
+    "interviewing",
+    "strategy",
 }
 
 
@@ -135,7 +146,10 @@ def packs_for_words(words: list[Word]) -> list[list[Word]]:
     return out
 
 
-def explode_caption_timeline(timeline: CaptionTimeline) -> CaptionTimeline:
+def explode_caption_timeline(
+    timeline: CaptionTimeline,
+    video_duration: float | None = None,
+) -> CaptionTimeline:
     """Split captions that would sit on screen for many seconds without changing."""
     exploded: list[Caption] = []
     for cap in timeline.captions:
@@ -189,17 +203,21 @@ def explode_caption_timeline(timeline: CaptionTimeline) -> CaptionTimeline:
                     text=stabilize_copy(" ".join(w.word for w in pack)) or pack[0].word,
                     position=cap.position,
                     animation=cap.animation,
+                    treatment=cap.treatment,
                     words=pack_words,
                 )
             )
     return CaptionTimeline(
         version=timeline.version,
         style=timeline.style,
-        captions=_clamp_caption_holds(exploded),
+        captions=_clamp_caption_holds(exploded, video_duration=video_duration),
     )
 
 
-def _clamp_caption_holds(captions: list[Caption]) -> list[Caption]:
+def _clamp_caption_holds(
+    captions: list[Caption],
+    video_duration: float | None = None,
+) -> list[Caption]:
     ordered = sorted(captions, key=lambda c: (c.start, c.end))
     clamped: list[Caption] = []
     for i, cap in enumerate(ordered):
@@ -214,8 +232,13 @@ def _clamp_caption_holds(captions: list[Caption]) -> list[Caption]:
             spoken_end + MAX_CAPTION_HOLD,
             nxt - 0.03,
         )
+        if video_duration and video_duration > 0:
+            end = min(end, float(video_duration))
+        end = max(end, float(cap.start) + 0.22)
+        if video_duration and video_duration > 0:
+            end = min(end, float(video_duration))
         if end <= float(cap.start):
-            end = float(cap.start) + 0.22
+            end = min(float(cap.start) + 0.22, float(video_duration or cap.start + 0.22))
         words = []
         for w in cap.words:
             w_end = min(float(w.end), end)
@@ -237,10 +260,137 @@ def _clamp_caption_holds(captions: list[Caption]) -> list[Caption]:
                 text=cap.text,
                 position=cap.position,
                 animation=cap.animation,
+                treatment=cap.treatment,
                 words=words,
             )
         )
     return clamped
+
+
+def pace_caption_treatments(timeline: CaptionTimeline) -> CaptionTimeline:
+    """Keep ovals/blobs rare so the reel stays happening, not surprising."""
+    last = -999.0
+    captions: list[Caption] = []
+    for cap in timeline.captions:
+        treatment: CaptionTreatment = cap.treatment
+        if treatment in _SPECIAL:
+            if float(cap.start) - last < _SPECIAL_GAP:
+                treatment = "serif"
+            else:
+                last = float(cap.start)
+        if treatment == "plain" and any(w.emphasis for w in cap.words):
+            treatment = "mix"
+        captions.append(cap.model_copy(update={"treatment": treatment}))
+    return CaptionTimeline(
+        version=timeline.version,
+        style=timeline.style,
+        captions=captions,
+    )
+
+
+_FILLER = {
+    "a", "an", "the", "and", "or", "to", "of", "in", "on", "for", "so", "it",
+    "is", "my", "just", "just", "when", "into", "into", "from", "as", "at",
+    "i", "me", "we", "you", "they", "them", "this", "that", "there", "here",
+}
+
+_OVAL_TERMS = (
+    "rag",
+    "fine-tuning",
+    "fine tuning",
+    "llm",
+    "ai engineer",
+    "lora",
+    "peft",
+)
+
+
+def _token_count(caption: Caption) -> int:
+    return len([t for t in caption.text.replace("\n", " ").split() if t])
+
+
+def _merge_captions(a: Caption, b: Caption) -> Caption:
+    text = f"{a.text.replace(chr(10), ' ')} {b.text.replace(chr(10), ' ')}".strip()
+    words = list(a.words) + [
+        w.model_copy(update={"start": max(float(w.start), float(a.start))})
+        for w in b.words
+    ]
+    treatment = a.treatment
+    if b.treatment in _SPECIAL or (b.treatment == "mix" and a.treatment == "plain"):
+        treatment = b.treatment
+    return Caption(
+        start=a.start,
+        end=max(float(a.end), float(b.end)),
+        text=text,
+        position=a.position,
+        animation=a.animation,
+        treatment=treatment,
+        words=words,
+    )
+
+
+def coalesce_short_captions(timeline: CaptionTimeline) -> CaptionTimeline:
+    """Join 1–2 word leftovers so lines read like the reference reels."""
+    caps = list(timeline.captions)
+    if not caps:
+        return timeline
+    out: list[Caption] = []
+    current = caps[0]
+    for nxt in caps[1:]:
+        gap = float(nxt.start) - float(current.end)
+        n = _token_count(current) + _token_count(nxt)
+        tiny = _token_count(current) <= 2 or _token_count(nxt) <= 2
+        if tiny and gap <= 0.55 and n <= 4:
+            current = _merge_captions(current, nxt)
+            continue
+        out.append(current)
+        current = nxt
+    out.append(current)
+    return CaptionTimeline(
+        version=timeline.version, style=timeline.style, captions=out
+    )
+
+
+def _stem(token: str) -> str:
+    return token.strip(".,!?;:\"'“”").lower()
+
+
+def _mark_unique_words(caption: Caption) -> list[CaptionWord]:
+    marked: list[CaptionWord] = []
+    for word in caption.words:
+        stem = _stem(word.text)
+        hot = bool(word.emphasis) or stem in _EMPHASIS
+        if stem in _FILLER:
+            hot = False
+        marked.append(word.model_copy(update={"emphasis": hot}))
+    return marked
+
+
+def decorate_caption_treatments(timeline: CaptionTimeline) -> CaptionTimeline:
+    """Promote unique phrases to serif/oval without decorating filler."""
+    last_special = -999.0
+    captions: list[Caption] = []
+    for cap in timeline.captions:
+        blob = cap.text.replace("\n", " ").lower()
+        words = _mark_unique_words(cap)
+        has_hot = any(w.emphasis for w in words)
+        treatment = cap.treatment
+        if any(term in blob for term in _OVAL_TERMS):
+            if float(cap.start) - last_special >= _SPECIAL_GAP:
+                treatment = "oval"
+                last_special = float(cap.start)
+            elif treatment in {"plain", "mix"}:
+                treatment = "serif"
+        elif treatment == "mix" and not has_hot:
+            treatment = "plain"
+        elif treatment == "serif" and not has_hot:
+            treatment = "plain"
+        elif treatment == "plain" and has_hot:
+            treatment = "mix"
+        captions.append(cap.model_copy(update={"treatment": treatment, "words": words}))
+    return CaptionTimeline(
+        version=timeline.version, style=timeline.style, captions=captions
+    )
 
 
 def heuristic_caption_timeline(
@@ -254,23 +404,37 @@ def heuristic_caption_timeline(
     for group in _group_words(words):
         start = group[0].start
         end = max(max(w.end for w in group), start + 0.25)
+        raw_words = [
+            CaptionWord(
+                text=stabilize_copy(w.word) or w.word,
+                start=max(w.start, start),
+                end=min(max(w.end, max(w.start, start) + 0.05), end),
+                emphasis=w.word.lower().strip(".,!?") in _EMPHASIS,
+            )
+            for w in group
+        ]
+        treatment: CaptionTreatment = "mix" if any(w.emphasis for w in raw_words) else "plain"
+        text = caption_spoken_case(
+            stabilize_copy(" ".join(w.word for w in group)),
+            treatment=treatment,
+        )
+        cased = [
+            w.model_copy(update={"text": caption_spoken_case(w.text, treatment="plain") or w.text})
+            for w in raw_words
+        ]
         captions.append(
             Caption(
                 start=start,
                 end=end,
-                text=stabilize_copy(" ".join(w.word for w in group)),
+                text=text,
                 position="center",
                 animation="pop",
-                words=[
-                    CaptionWord(
-                        text=stabilize_copy(w.word) or w.word,
-                        start=max(w.start, start),
-                        end=min(max(w.end, max(w.start, start) + 0.05), end),
-                        emphasis=w.word.lower().strip(".,!?") in _EMPHASIS,
-                    )
-                    for w in group
-                ],
+                treatment=treatment,
+                words=cased,
             )
         )
     data = CaptionTimeline(captions=captions)
-    return validate_caption_timeline(data, video_duration)
+    timeline = coalesce_short_captions(data)
+    timeline = decorate_caption_treatments(timeline)
+    timeline = pace_caption_treatments(timeline)
+    return validate_caption_timeline(timeline, video_duration)

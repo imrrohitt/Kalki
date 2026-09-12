@@ -17,12 +17,16 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app.asr import known_terms_in, stabilize_copy
+from app.captions.copy import caption_spoken_case, parse_treatment
 from app.captions.heuristic import (
+    coalesce_short_captions,
+    decorate_caption_treatments,
     explode_caption_timeline,
     heuristic_caption_timeline,
+    pace_caption_treatments,
     packs_for_words,
 )
-from app.captions.models import CaptionTimeline
+from app.captions.models import CaptionTimeline, CaptionTreatment
 from app.captions.validation import format_validation_error, validate_caption_timeline
 from app.config import settings
 from app.transcription.models import Transcript, Word
@@ -41,10 +45,12 @@ The word list is ASR. It may be English, Hindi, Hinglish (Hindi in Latin letters
 or mixed. Tokens may be misspelled. You do NOT put raw ASR on screen.
 
 Language law (non-negotiable):
-- Every on-screen `text` value MUST be fluent English. Title Case.
+- Every on-screen `text` value MUST be fluent English.
+- Spoken sentence case, NEVER Title Case, never ALL CAPS (except AI, RAG, LLM, GDPR, I).
+  "told me" not "Told Me". "I don't use AI" keeps I and AI.
 - If ASR is Hindi or Hinglish, TRANSLATE the meaning into natural English captions.
-  "aapko data secure karna hai" → "You Need To\\nSecure Data"
-  "pehla step yeh hai" → "The First Step"
+  "aapko data secure karna hai" → "you need to\\nsecure data"
+  "pehla step yeh hai" → "the first step"
 - Never print Devanagari. Never print Hinglish filler (hai, hain, karna, aapko, toh, yeh, woh, ka, ki, ke, mein, se).
 - Keep technical terms in English (RAG, LLM, GDPR, Fine-tuning, LoRA).
 - Reuse the speaker's intent and examples. Do not invent claims they did not make.
@@ -53,8 +59,9 @@ Workflow:
 1. Read numbered ASR words (timing only — they may be any language).
 2. Group them into short captions by meaning (usually 2-4 English words).
 3. WRITE the on-screen `text` yourself in English.
-4. Call submit_caption_groups once with JSON.
-5. If ok=false, fix and submit again.
+4. Pick a treatment. Most lines are plain. Special looks are rare.
+5. Call submit_caption_groups once with JSON.
+6. If ok=false, fix and submit again.
 
 Duration law (non-negotiable):
 - Each caption is 2–4 English words and typically 1–3 seconds on screen.
@@ -66,19 +73,32 @@ Display text rules:
 - `text` is the published English caption, not a join of ASR tokens.
 - Fix slips: RAKA→RAG, fine tunning→Fine-tuning, lora→LoRA, destillation→distillation.
 - Keep the same meaning as those timed words.
-- Title Case. Max 2 lines, use \\n. Each line ~12–20 characters.
+- Sentence case. Max 2 lines, use \\n. Each line ~12–20 characters.
 - No emojis, hashtags. ? is OK.
 - Keep phrases together: Fine-tuning, RAG, AI interviews, domain data, LLM.
-- emphasis_id: 0 or 1 word id per caption (the payload word that names RAG, LLM, AI, Fine-tuning, DATA).
+- emphasis_id: 0 or 1 word id per mix caption (the unique noun: AI, creator, RAG).
 - ids must be consecutive, cover every ASR word in order, no duplicates, no skips.
+
+Treatments (this is the look — do not overuse):
+- plain — white sans, filler and regular speech ("told me", "and I think"). MOST captions.
+- mix — white sans + ONE cream-serif keyword via emphasis_id ("as the creator", "I don't use AI").
+- serif — whole line cream serif for a hook or unique idea ("the biggest brand", "camera presence").
+- quote — a spoken quote in cream serif with quotation marks.
+- oval — a coined concept / the point of a beat, cream serif in a thin oval with sparkles. RARE.
+- underline — a concrete new thing ("a new apartment") with a cream rule + diamond. RARE.
+- blob — a named program or challenge title, organic green sticker. At most ONE per video.
+- stack — two lines: first cream serif, second white sans ("The biggest brand\\nI worked with this").
+Never decorate filler. Cap oval+underline+blob to about one every 12 seconds. The reel should feel
+happening, not surprising.
 
 submit_caption_groups JSON:
 {
   "captions": [
     {
       "ids": [0, 1, 2],
-      "text": "If You Are\\nGiving",
+      "text": "as the creator",
       "emphasis_id": 2,
+      "treatment": "mix",
       "position": "bottom_center"
     }
   ]
@@ -206,14 +226,23 @@ def _caption_dict(
     *,
     position: str,
     hot_asr: str | None,
+    treatment: CaptionTreatment = "plain",
 ) -> dict[str, Any]:
+    treatment = parse_treatment(treatment)
+    if treatment == "plain" and hot_asr:
+        treatment = "mix"
+    cased = caption_spoken_case(text, treatment=treatment)
+    words = _timed_english_words(cased, pack, hot_asr=hot_asr)
+    for word in words:
+        word["text"] = caption_spoken_case(str(word["text"]), treatment="plain") or word["text"]
     return {
         "start": pack[0].start,
         "end": max(pack[-1].end, pack[0].start + 0.25),
-        "text": text,
+        "text": cased,
         "position": position or "bottom_center",
         "animation": "pop",
-        "words": _timed_english_words(text, pack, hot_asr=hot_asr),
+        "treatment": treatment,
+        "words": words,
     }
 
 
@@ -234,17 +263,24 @@ def _captions_from_pack_splits(
     *,
     position: str,
     hot_asr: str | None,
+    treatment: CaptionTreatment = "plain",
 ) -> list[dict[str, Any]]:
     if len(packs) == 1:
         return [
-            _caption_dict(packs[0], text, position=position, hot_asr=hot_asr)
+            _caption_dict(
+                packs[0],
+                text,
+                position=position,
+                hot_asr=hot_asr,
+                treatment=treatment,
+            )
         ]
     tokens = _display_tokens(text) if _english_covers_span(text, sum(len(p) for p in packs)) else []
     captions: list[dict[str, Any]] = []
     if tokens:
         counts = _allocate_token_counts(len(tokens), [len(p) for p in packs])
         idx = 0
-        for pack, count in zip(packs, counts):
+        for i, (pack, count) in enumerate(zip(packs, counts)):
             piece = tokens[idx : idx + count]
             idx += count
             pack_text = (
@@ -260,10 +296,11 @@ def _captions_from_pack_splits(
                     pack_text,
                     position=position,
                     hot_asr=_hot_asr_in_pack(pack, hot_asr),
+                    treatment=treatment if i == 0 else "plain",
                 )
             )
         return captions
-    for pack in packs:
+    for i, pack in enumerate(packs):
         pack_text = stabilize_copy(" ".join(w.word for w in pack))
         if not pack_text or _has_devanagari(pack_text):
             continue
@@ -273,6 +310,7 @@ def _captions_from_pack_splits(
                 pack_text,
                 position=position,
                 hot_asr=_hot_asr_in_pack(pack, hot_asr),
+                treatment=treatment if i == 0 else "plain",
             )
         )
     return captions
@@ -322,12 +360,14 @@ def _captions_from_ids(
                     hot_asr = stabilize_copy(src.word) or src.word
                     break
         position = group.get("position") or "bottom_center"
+        treatment = parse_treatment(group.get("treatment"))
         captions.extend(
             _captions_from_pack_splits(
                 packs_for_words(group_words),
                 text,
                 position=position,
                 hot_asr=hot_asr,
+                treatment=treatment,
             )
         )
     if cursor < len(source_words):
@@ -478,7 +518,7 @@ class CaptionAgentService:
             """Submit finished caption groups as a JSON string.
 
             Expected shape:
-            {"captions": [{"ids": [0, 1], "text": "HELLO\\nWORLD", "emphasis_id": 0, "position": "bottom_center"}]}
+            {"captions": [{"ids": [0, 1], "text": "as the creator", "emphasis_id": 0, "treatment": "mix", "position": "bottom_center"}]}
 
             ids are 0-based inside THIS word list, consecutive, covering every word.
             """
@@ -501,8 +541,9 @@ class CaptionAgentService:
         prompt = (
             "Write English captions for this ASR chunk. Timing from ids. "
             "ASR may be Hindi, Hinglish, or English — on-screen `text` is always English. "
-            "Translate meaning; keep technical terms (RAG, LLM, GDPR). "
-            "Never print Devanagari or Hinglish filler. Cover every id. "
+            "Sentence case, never Title Case. Translate meaning; keep technical terms. "
+            "Most captions treatment=plain. Use mix for one unique word, serif for a hook, "
+            "oval/underline/blob rarely. Never decorate filler. Cover every id. "
             "Each caption 2-4 words, 1-3 seconds. Never one caption for the rest of the talk. "
             "Call submit_caption_groups once.\n\n"
             + json.dumps(payload, ensure_ascii=False)
@@ -592,8 +633,14 @@ class CaptionAgentService:
                 all_captions.extend(captions)
 
             data = {"version": "1.0", "style": "dynamic_social", "captions": all_captions}
-            timeline = validate_caption_timeline(data, video_duration)
-            return explode_caption_timeline(timeline)
+            timeline = explode_caption_timeline(
+                CaptionTimeline.model_validate(data),
+                video_duration=video_duration,
+            )
+            timeline = coalesce_short_captions(timeline)
+            timeline = decorate_caption_treatments(timeline)
+            timeline = pace_caption_treatments(timeline)
+            return validate_caption_timeline(timeline, video_duration)
         except Exception as exc:
             logger.warning(
                 "[%s] caption LLM failed (%s); using heuristic grouping",

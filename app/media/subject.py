@@ -27,7 +27,10 @@ def detect_head_top(
     """
     times = timestamps or _sample_times(source)
     tops: list[int] = []
-    vf = f"scale={_COLS}:{_ROWS},format=gray"
+    vf = (
+        f"scale={_COLS}:{_ROWS}:force_original_aspect_ratio=increase,"
+        f"crop={_COLS}:{_ROWS},format=gray"
+    )
     for t in times:
         raw = _grab_gray(source, t, vf)
         if raw is None:
@@ -37,11 +40,11 @@ def detect_head_top(
             continue
         tops.append(int(round(row / _ROWS * height)))
     if not tops:
-        fallback = int(height * 0.30)
+        fallback = int(height * 0.34)
         logger.info("head-top detect failed; using y=%s", fallback)
         return fallback
     y = int(statistics.median(tops))
-    y = max(int(height * 0.14), min(y, int(height * 0.62)))
+    y = max(int(height * 0.22), min(y, int(height * 0.58)))
     logger.info("head-top y=%s (from %s samples)", y, len(tops))
     return y
 
@@ -84,14 +87,44 @@ def _grab_gray(source: str, timestamp: float, vf: str) -> bytes | None:
     return data[: _COLS * _ROWS]
 
 
-def _first_subject_row(pixels: bytes, cols: int, rows: int) -> int | None:
-    """Backdrop is the top band. The first row that diverges is the head."""
-    top = pixels[: cols * 3]
-    bg = sorted(top)[len(top) // 2]
-    threshold = 26
-    for y in range(2, rows - 4):
+def _backdrop_value(pixels: bytes, cols: int, rows: int) -> int:
+    """Wall color from the side strips, skipping the ceiling band."""
+    samples: list[int] = []
+    y0 = max(6, rows // 10)
+    y1 = max(y0 + 4, rows // 3)
+    edge = max(4, cols // 10)
+    for y in range(y0, y1):
         row = pixels[y * cols : (y + 1) * cols]
-        changed = sum(1 for p in row if abs(p - bg) > threshold)
-        if changed / cols >= 0.16:
+        samples.extend(row[:edge])
+        samples.extend(row[-edge:])
+    if not samples:
+        return 128
+    return sorted(samples)[len(samples) // 2]
+
+
+def _first_subject_row(pixels: bytes, cols: int, rows: int) -> int | None:
+    """First row where the center leaves the wall (hair), skipping the ceiling."""
+    bg = _backdrop_value(pixels, cols, rows)
+    threshold = 28
+    start = max(6, rows // 10)
+    left = cols // 5
+    right = 4 * cols // 5
+    seen_wall = False
+    wall_rows = 0
+    for y in range(start, rows - 6):
+        row = pixels[y * cols : (y + 1) * cols]
+        center = row[left:right]
+        if not center:
+            continue
+        changed = sum(1 for p in center if abs(p - bg) > threshold) / len(center)
+        if not seen_wall:
+            if changed < 0.18:
+                wall_rows += 1
+                if wall_rows >= 2:
+                    seen_wall = True
+            else:
+                wall_rows = 0
+            continue
+        if changed >= 0.45:
             return y
     return None

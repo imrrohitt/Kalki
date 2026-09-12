@@ -5,6 +5,7 @@ from app.captions.agent import (
     _lite_llm_model,
     _parse_caption_groups,
 )
+from app.captions.copy import caption_spoken_case
 from app.transcription.models import Segment, Transcript, Word
 
 
@@ -22,6 +23,13 @@ def test_deepseek_openai_prefix_uses_deepseek_provider():
     assert _lite_llm_model("deepseek/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
 
 
+def test_caption_spoken_case_keeps_i_and_acronyms():
+    assert caption_spoken_case("They Picked Me") == "they picked me"
+    assert caption_spoken_case("I DON'T USE AI", treatment="mix") == "I don't use AI"
+    assert caption_spoken_case("the biggest brand", treatment="serif") == "The biggest brand"
+    assert caption_spoken_case("lived experience", treatment="oval") == "Lived experience"
+
+
 def test_parse_caption_groups_object_and_array():
     assert _parse_caption_groups('{"captions": [{"ids": [0]}]}') == [{"ids": [0]}]
     assert _parse_caption_groups([{"ids": [1, 2]}]) == [{"ids": [1, 2]}]
@@ -37,9 +45,10 @@ def test_captions_from_ids_groups_and_emphasis():
         words,
     )
     assert len(captions) == 2
-    assert captions[0]["text"] == "IF YOU"
+    assert captions[0]["text"] == "if you"
     assert captions[1]["words"][-1]["emphasis"] is True
     assert captions[0]["words"][0]["emphasis"] is False
+    assert captions[1]["treatment"] == "mix"
 
 
 def test_captions_rewrite_asr_slips():
@@ -56,7 +65,7 @@ def test_captions_rewrite_asr_slips():
 def test_captions_from_ids_fills_skipped_words():
     words = _words("a", "b", "c")
     captions = _captions_from_ids([{"ids": [0, 2], "text": "A C"}], words)
-    assert [w["text"] for w in captions[0]["words"]] == ["A", "C"]
+    assert [w["text"] for w in captions[0]["words"]] == ["a", "c"]
     assert captions[0]["start"] == words[0].start
     assert captions[0]["end"] >= words[2].end
 
@@ -73,9 +82,9 @@ def test_captions_from_hinglish_asr_use_english_text():
         ],
         words,
     )
-    assert captions[0]["text"] == "You Need To\nSecure Data"
+    assert captions[0]["text"] == "you need to\nsecure data"
     shown = [w["text"] for w in captions[0]["words"]]
-    assert shown == ["You", "Need", "To", "Secure", "Data"]
+    assert shown == ["you", "need", "to", "secure", "data"]
     assert "aapko" not in shown
     assert "karna" not in shown
     assert any(w["emphasis"] for w in captions[0]["words"])
@@ -88,7 +97,7 @@ def test_captions_skip_devanagari_leftover():
         words,
     )
     assert len(captions) == 1
-    assert captions[0]["text"] == "Hello"
+    assert captions[0]["text"] == "hello"
 
 
 def test_flatten_and_chunk_words():
@@ -169,3 +178,102 @@ def test_explode_caption_timeline_splits_stuck_line():
     assert len(timeline.captions) >= 25
     assert all(c.end - c.start <= 4.0 for c in timeline.captions)
     assert timeline.captions[-1].end >= words[-1].end - 0.9
+
+
+def test_explode_clamps_tiny_captions_to_readable_duration():
+    from app.captions.heuristic import explode_caption_timeline
+    from app.captions.models import Caption, CaptionTimeline, CaptionWord
+
+    timeline = explode_caption_timeline(
+        CaptionTimeline(
+            captions=[
+                Caption(
+                    start=1.0,
+                    end=1.05,
+                    text="hi",
+                    words=[CaptionWord(text="hi", start=1.0, end=1.05)],
+                ),
+                Caption(
+                    start=1.08,
+                    end=2.0,
+                    text="there",
+                    words=[CaptionWord(text="there", start=1.08, end=2.0)],
+                ),
+            ]
+        ),
+        video_duration=5.0,
+    )
+    assert all(c.end - c.start >= 0.12 for c in timeline.captions)
+
+
+def test_coalesce_joins_one_word_captions():
+    from app.captions.heuristic import coalesce_short_captions
+    from app.captions.models import Caption, CaptionTimeline, CaptionWord
+
+    timeline = coalesce_short_captions(
+        CaptionTimeline(
+            captions=[
+                Caption(
+                    start=0.0,
+                    end=0.4,
+                    text="I",
+                    words=[CaptionWord(text="I", start=0.0, end=0.4)],
+                ),
+                Caption(
+                    start=0.42,
+                    end=0.8,
+                    text="just",
+                    words=[CaptionWord(text="just", start=0.42, end=0.8)],
+                ),
+                Caption(
+                    start=0.82,
+                    end=1.3,
+                    text="switched",
+                    words=[CaptionWord(text="switched", start=0.82, end=1.3)],
+                ),
+            ]
+        )
+    )
+    assert len(timeline.captions) == 1
+    assert "just" in timeline.captions[0].text
+    assert "switched" in timeline.captions[0].text
+
+
+def test_decorate_marks_unique_words_and_drops_filler_mix():
+    from app.captions.heuristic import decorate_caption_treatments
+    from app.captions.models import Caption, CaptionTimeline, CaptionWord
+
+    timeline = decorate_caption_treatments(
+        CaptionTimeline(
+            captions=[
+                Caption(
+                    start=0.0,
+                    end=1.0,
+                    text="I just switched",
+                    treatment="mix",
+                    words=[
+                        CaptionWord(text="I", start=0.0, end=0.3, emphasis=True),
+                        CaptionWord(text="just", start=0.3, end=0.6),
+                        CaptionWord(text="switched", start=0.6, end=1.0),
+                    ],
+                ),
+                Caption(
+                    start=1.2,
+                    end=2.4,
+                    text="my copy of RAG",
+                    treatment="plain",
+                    words=[
+                        CaptionWord(text="my", start=1.2, end=1.5),
+                        CaptionWord(text="copy", start=1.5, end=1.8),
+                        CaptionWord(text="of", start=1.8, end=2.0),
+                        CaptionWord(text="RAG", start=2.0, end=2.4),
+                    ],
+                ),
+            ]
+        )
+    )
+    filler, rag = timeline.captions
+    assert filler.treatment == "plain"
+    assert all(not w.emphasis for w in filler.words)
+    assert rag.treatment in {"mix", "oval", "serif"}
+    assert rag.words[-1].emphasis is True

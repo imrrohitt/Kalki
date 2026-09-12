@@ -124,6 +124,20 @@ ACCENT = _PAPER.accent
 HAIR_INK = _PAPER.hair
 CAPTION_EMPHASIS = _PAPER.caption_emphasis
 
+# Overlay talking-head captions (Visha-style): heavy white sans + cream serif.
+FONT_CAPTION_SANS = "Montserrat ExtraBold"
+FONT_CAPTION_SERIF = "Playfair Display"
+CAPTION_CREAM = "&H00B8E6F4"       # #F4E6B8 ivory
+CAPTION_BLOB = "&H00324A38"        # #384A32 forest
+CAPTION_SHADOW = "&H64001418"
+CAPTION_OUTLINE = "&H0014181C"
+
+# Overlay type is large on a 9:16 phone, even when the source is 720–864 wide.
+FS_OVERLAY_BODY = 104
+FS_OVERLAY_HOT = 144
+FS_OVERLAY_HOOK = 152
+FS_OVERLAY_MIN = 80
+
 # ---------------------------------------------------------------- fonts
 FONT_REGULAR = "Montserrat"          # Bold flag off
 FONT_MEDIUM = "Montserrat Medium"

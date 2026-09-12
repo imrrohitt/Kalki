@@ -14,6 +14,8 @@ from app.media.probe import probe_audio, probe_video, validate_audio, validate_v
 from app.pipeline.jobs import JobStatus, job_store
 from app.renderer.ffmpeg_renderer import FFmpegRenderer
 from app.transcription.faster_whisper_provider import FasterWhisperProvider
+from app.transcription.markdown import parse_timestamped_markdown
+from app.transcription.models import Transcript
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +83,37 @@ class Pipeline:
             logger.info("[%s] audio extracted (%.1fs)", jid, time.perf_counter() - t_audio)
 
             job.set_stage(JobStatus.transcribing)
-            logger.info("[%s] transcribing", jid)
             t_stt = time.perf_counter()
-            transcript = await self.stt.transcribe(str(audio_path))
+            if job.skip_stt:
+                logger.info("[%s] using uploaded transcript (whisper skipped)", jid)
+                if transcript_path.exists():
+                    transcript = Transcript.model_validate_json(
+                        transcript_path.read_text(encoding="utf-8")
+                    )
+                else:
+                    md = next(iter(job_dir.glob("transcription.md")), None) or next(
+                        iter(job_dir.glob("*.md")), None
+                    )
+                    if md is None:
+                        raise RuntimeError("skip_stt set but no transcript file found")
+                    transcript = parse_timestamped_markdown(
+                        md.read_text(encoding="utf-8"),
+                        duration=info.duration,
+                    )
+                    transcript_path.write_text(
+                        transcript.model_dump_json(indent=2),
+                        encoding="utf-8",
+                    )
+                if transcript.duration is None:
+                    transcript.duration = info.duration
+                job.metrics["transcription_source"] = "upload"
+            else:
+                logger.info("[%s] transcribing", jid)
+                transcript = await self.stt.transcribe(str(audio_path))
+                transcript_path.write_text(
+                    transcript.model_dump_json(indent=2),
+                    encoding="utf-8",
+                )
             job.metrics["transcription_time_ms"] = int(
                 (time.perf_counter() - t_stt) * 1000
             )
@@ -96,15 +126,9 @@ class Pipeline:
                 len(transcript.segments),
                 time.perf_counter() - t_stt,
             )
-            transcript_path.write_text(
-                transcript.model_dump_json(indent=2),
-                encoding="utf-8",
-            )
             job.transcript_path = str(transcript_path)
 
             duration = info.duration
-            if transcript.duration:
-                duration = min(duration, transcript.duration)
             visual = default_visual()
 
             job.set_stage(JobStatus.analyzing_editorial)

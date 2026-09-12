@@ -59,6 +59,7 @@ class Job:
     captions_path: str | None = None
     editorial_path: str | None = None
     edit_plan_path: str | None = None
+    skip_stt: bool = False
     metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -98,6 +99,7 @@ class Job:
             "captions_path": self.captions_path,
             "editorial_path": self.editorial_path,
             "edit_plan_path": self.edit_plan_path,
+            "skip_stt": self.skip_stt,
             "metrics": self.metrics,
         }
 
@@ -119,6 +121,7 @@ class Job:
             captions_path=data.get("captions_path"),
             editorial_path=data.get("editorial_path"),
             edit_plan_path=data.get("edit_plan_path"),
+            skip_stt=bool(data.get("skip_stt", False)),
             metrics=dict(data.get("metrics") or {}),
         )
 

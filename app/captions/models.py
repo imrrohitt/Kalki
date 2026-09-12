@@ -8,6 +8,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 CaptionPosition = Literal["top", "center", "bottom_center"]
 CaptionAnimation = Literal["none", "pop"]
 CaptionStyle = Literal["dynamic_social"]
+CaptionTreatment = Literal[
+    "plain",
+    "mix",
+    "serif",
+    "quote",
+    "oval",
+    "underline",
+    "blob",
+    "stack",
+]
 
 
 class CaptionWord(BaseModel):
@@ -39,6 +49,7 @@ class Caption(BaseModel):
     text: str
     position: CaptionPosition = "bottom_center"
     animation: CaptionAnimation = "pop"
+    treatment: CaptionTreatment = "plain"
     words: list[CaptionWord] = Field(default_factory=list)
 
     @field_validator("text")

@@ -58,6 +58,61 @@ def test_plan_sfx_hits_hook_and_vs():
         assert cur - prev >= 1.6
 
 
+def test_overlay_sfx_is_sparse_and_caption_based():
+    from app.captions.models import Caption, CaptionTimeline, CaptionWord
+    from app.editorial.sfx.planner import plan_overlay_sfx
+
+    timeline = CaptionTimeline(
+        captions=[
+            Caption(
+                start=0.2,
+                end=1.0,
+                text="told me",
+                treatment="plain",
+                words=[CaptionWord(text="told", start=0.2, end=0.6), CaptionWord(text="me", start=0.6, end=1.0)],
+            ),
+            Caption(
+                start=4.0,
+                end=5.2,
+                text="lived experience",
+                treatment="oval",
+                words=[
+                    CaptionWord(text="lived", start=4.0, end=4.5),
+                    CaptionWord(text="experience", start=4.5, end=5.2),
+                ],
+            ),
+            Caption(
+                start=6.0,
+                end=7.0,
+                text="and I think",
+                treatment="plain",
+                words=[CaptionWord(text="and", start=6.0, end=6.4), CaptionWord(text="I", start=6.4, end=7.0)],
+            ),
+            Caption(
+                start=16.0,
+                end=17.5,
+                text="the whole point",
+                treatment="oval",
+                words=[
+                    CaptionWord(text="the", start=16.0, end=16.3),
+                    CaptionWord(text="whole", start=16.3, end=16.8),
+                    CaptionWord(text="point", start=16.8, end=17.5),
+                ],
+            ),
+        ]
+    )
+    hits = plan_overlay_sfx(timeline, video_duration=20.0)
+    assert hits
+    assert all(h.kind in {"whoosh", "hit"} for h in hits)
+    assert all(h.kind != "impact" for h in hits)
+    assert len(hits) <= 6
+    reasons = {h.reason for h in hits}
+    assert "oval" in reasons
+    times = [h.at for h in hits]
+    for prev, cur in zip(times, times[1:]):
+        assert cur - prev >= 8.0
+
+
 def test_sfx_mix_builds_adelay_graph():
     hits = [
         SfxHit(at=0.2, kind="impact", reason="hook"),

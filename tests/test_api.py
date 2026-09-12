@@ -327,3 +327,41 @@ def test_videos_query_params_theme_and_split_screen(tmp_path, monkeypatch):
                 files={"file": ("clip.mp4", f, "video/mp4")},
             )
         assert bad.status_code == 400
+
+
+def test_videos_accepts_markdown_transcript_and_skips_whisper(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
+    from app.config import Settings
+
+    test_settings = Settings(storage_dir=str(tmp_path / "storage"))
+    monkeypatch.setattr("app.config.settings", test_settings)
+    monkeypatch.setattr("app.api.routes.settings", test_settings)
+    routes._pipeline = MagicMock()
+    routes._pipeline.run = AsyncMock()
+    app = create_app()
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not-a-real-video")
+    md = tmp_path / "transcription.md"
+    md.write_text(
+        "**00:00 - 00:04**\n\nHi, I switched to Senior AI Engineer.\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(app) as client:
+        with video.open("rb") as vf, md.open("rb") as tf:
+            resp = client.post(
+                "/api/v1/videos?split_screen=false",
+                files={
+                    "file": ("clip.mp4", vf, "video/mp4"),
+                    "transcript": ("transcription.md", tf, "text/markdown"),
+                },
+            )
+    assert resp.status_code == 200
+    body = resp.json()
+    job = job_store.get(body["job_id"])
+    assert job is not None
+    assert job.skip_stt is True
+    assert job.split_layout is False
+    stored = Path(job.transcript_path)
+    assert stored.exists()
+    assert "Senior" in stored.read_text(encoding="utf-8")

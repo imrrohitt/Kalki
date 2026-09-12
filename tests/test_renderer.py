@@ -432,3 +432,30 @@ def test_detect_head_top_finds_subject(tmp_path: Path):
     )
     y = detect_head_top(str(src), width=1080, height=1920, timestamps=[0.2])
     assert 560 <= y <= 820
+
+
+def test_detect_head_top_skips_ceiling(tmp_path: Path):
+    from app.media.subject import detect_head_top
+
+    src = tmp_path / "ceiling.mp4"
+    subprocess.run(
+        [
+            settings.ffmpeg_path,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0xE8C8C8:s=1080x1920:d=1,"
+            "drawbox=x=0:y=0:w=1080:h=280:color=0x6A5A58:t=fill,"
+            "drawbox=x=240:y=720:w=600:h=900:color=black:t=fill",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    y = detect_head_top(str(src), width=1080, height=1920, timestamps=[0.2])
+    assert 600 <= y <= 860

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -11,6 +12,7 @@ from app.config import settings
 from app.pipeline.jobs import Job, JobStatus, job_store
 from app.pipeline.runner import Pipeline
 from app.renderer.design import THEMES
+from app.transcription.markdown import transcript_from_upload
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1")
@@ -57,6 +59,24 @@ def _job_payload(job: Job, *, include_progress: bool = False) -> dict:
     return payload
 
 
+def _store_transcript(job: Job, file: UploadFile) -> None:
+    raw = file.file.read()
+    if not raw.strip():
+        raise HTTPException(status_code=400, detail="Empty transcript file")
+    name = Path(file.filename or "transcription.md").name
+    dest = job.job_dir / name
+    dest.write_bytes(raw)
+    try:
+        transcript = transcript_from_upload(raw, name)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid transcript: {exc}") from exc
+    path = job.job_dir / "transcript.json"
+    path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
+    job.transcript_path = str(path)
+    job.skip_stt = True
+    job.persist()
+
+
 def _store_source(job: Job, file: UploadFile, suffix: str) -> None:
     dest = job.job_dir / f"source{suffix}"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +98,7 @@ async def list_themes():
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    transcript: UploadFile | None = File(None),
     theme: str = Query("", description="Motion-graphics theme: paper|noir|tech|ivory"),
     split_screen: bool = Query(
         False,
@@ -98,6 +119,8 @@ async def upload_video(
     job.theme = theme
     job.split_layout = split_screen
     _store_source(job, file, suffix)
+    if transcript is not None and transcript.filename:
+        _store_transcript(job, transcript)
 
     size_mb = Path(job.source_path).stat().st_size / (1024 * 1024)
     logger.info(

@@ -151,9 +151,10 @@ def test_ass_split_includes_motion_and_seam_captions(tmp_path):
     assert r"\alpha&HFF&" in text
 
 
-def test_overlay_emphasis_is_bigger_and_pops(tmp_path):
+def test_overlay_emphasis_uses_cream_serif(tmp_path):
     from app.captions.models import Caption, CaptionTimeline, CaptionWord
     from app.renderer.ass import write_ass_file
+    from app.renderer.design import CAPTION_CREAM, FONT_CAPTION_SANS, FONT_CAPTION_SERIF
 
     path = tmp_path / "kinetic.ass"
     write_ass_file(
@@ -163,6 +164,7 @@ def test_overlay_emphasis_is_bigger_and_pops(tmp_path):
                     start=0.2,
                     end=1.8,
                     text="Why RAG",
+                    treatment="mix",
                     words=[
                         CaptionWord(text="Why", start=0.2, end=0.6),
                         CaptionWord(text="RAG", start=0.6, end=1.8, emphasis=True),
@@ -176,15 +178,18 @@ def test_overlay_emphasis_is_bigger_and_pops(tmp_path):
         theme="tech",
     )
     text = path.read_text()
-    assert r"\fs72" in text
-    assert r"\fs94" in text
-    assert r"\an8\pos(540," in text
+    assert FONT_CAPTION_SANS in text
+    assert FONT_CAPTION_SERIF in text
+    assert r"\an2\pos(540," in text
     assert r"\clip(" in text
-    assert r"\t(" in text
-    assert "WHY" in text
+    assert "Why" in text
     assert "RAG" in text
-    # Emphasis uses the theme accent, not the body white.
-    assert r"\c&H00FFC94F&" in text
+    assert "WHY" not in text
+    assert CAPTION_CREAM in text
+    assert r"\fad(" in text
+    body_fs = int(text.split("Why")[0].rsplit(r"\fs", 1)[-1].split("\\")[0].split("&")[0])
+    rag_fs = int(text.split("RAG")[0].rsplit(r"\fs", 1)[-1].split("\\")[0].split("&")[0])
+    assert rag_fs >= body_fs + 24
 
 
 def test_overlay_captions_sit_above_head_and_wrap(tmp_path):
@@ -216,9 +221,43 @@ def test_overlay_captions_sit_above_head_and_wrap(tmp_path):
     )
     text = path.read_text()
     dialogue = [ln for ln in text.splitlines() if ln.startswith("Dialogue: 5,")][0]
-    assert r"\an8\pos(540,96)" in dialogue
+    assert r"\an2\pos(540," in dialogue
+    y = int(dialogue.split(r"\an2\pos(540,")[1].split(")")[0])
+    assert 400 <= y <= 470
     assert r"\N" in dialogue
     assert "GDPR" in dialogue
+
+
+def test_overlay_oval_draws_ellipse_and_sparkles(tmp_path):
+    from app.captions.models import Caption, CaptionTimeline, CaptionWord
+    from app.renderer.ass import write_ass_file
+
+    path = tmp_path / "oval.ass"
+    write_ass_file(
+        CaptionTimeline(
+            captions=[
+                Caption(
+                    start=0.2,
+                    end=1.8,
+                    text="lived experience",
+                    treatment="oval",
+                    words=[
+                        CaptionWord(text="lived", start=0.2, end=0.8),
+                        CaptionWord(text="experience", start=0.8, end=1.8),
+                    ],
+                )
+            ]
+        ),
+        str(path),
+        split_layout=False,
+        video_duration=2.0,
+    )
+    text = path.read_text()
+    assert "CapDraw" in text
+    assert r"\p1" in text
+    assert "lived" in text
+    assert "experience" in text
+    assert "Playfair Display" in text
 
 
 def test_short_headline_stays_on_one_line(tmp_path):

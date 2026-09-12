@@ -143,19 +143,21 @@ def _kinetic_line(
     return " ".join(parts)
 
 
-# Overlay / split / full: (body fs, emphasis fs). Overlay sits above the
-# head so type is smaller and wrap is tighter; emphasis still reads bigger.
+# Overlay / split / full: (body fs, emphasis fs). Overlay pins to the
+# head; unique words render a full size step larger in cream serif.
 _CAPTION_FS = {
-    "overlay": (72, 94),
+    "overlay": (D.FS_OVERLAY_BODY, D.FS_OVERLAY_HOT),
     "split": (78, 112),
     "full": (70, 102),
 }
 
 
 def _overlay_caption_y(head_top: int, height: int = 1920) -> int:
-    """Top of the caption block, in the empty wall space above the head."""
-    _ = height
-    return max(64, min(96, head_top // 5))
+    """Bottom of the caption block, a finger-width above the hair."""
+    gap = max(18, int(height * 0.012))
+    y = int(head_top) - gap
+    floor = max(240, int(height * 0.20))
+    return max(floor, min(y, int(height * 0.52)))
 
 
 def _caption_pop(uppercase: bool, *, split: bool = False) -> str:
@@ -184,7 +186,10 @@ def _styled_caption_text(
     layout = layout or ("split" if split else "overlay")
     stacked = layout in {"split", "full"}
     body_fs, hot_fs = _CAPTION_FS.get(layout, _CAPTION_FS["overlay"])
-    max_chars = 14 if stacked else 16
+    if stacked:
+        max_chars = 14
+    else:
+        max_chars = max(10, min(14, canvas_w // 62))
     wrapped = _wrap_caption_words(caption, max_chars=max_chars, max_lines=3)
     longest = max(
         (" ".join(w.text for w in line) for line in wrapped),
@@ -230,11 +235,11 @@ def _styled_caption_text(
         return rf"{{\an8\pos(540,{seam_y + 10})}}" + anim + body
     if layout == "full":
         return rf"{{\an8\pos(540,{D.CAPTION_Y_FULL})}}" + anim + body
-    clip_bottom = max(overlay_y + 80, head_top - 24)
+    clip_bottom = max(overlay_y + 24, head_top - 4)
     cx = canvas_w // 2
     margin = max(24, canvas_w // 18)
     return (
-        rf"{{\an8\pos({cx},{overlay_y})"
+        rf"{{\an2\pos({cx},{overlay_y})"
         rf"\clip({margin},16,{canvas_w - margin},{clip_bottom})}}"
         + anim
         + body
@@ -269,6 +274,7 @@ def _dedupe_overlaps(captions: list[Caption]) -> list[Caption]:
                 text=cap.text,
                 position=cap.position,
                 animation=cap.animation,
+                treatment=cap.treatment,
                 words=words,
             )
         )
@@ -276,13 +282,264 @@ def _dedupe_overlaps(captions: list[Caption]) -> list[Caption]:
     return fixed
 
 
-def _text_width(text: str, fs: int) -> int:
-    return int(0.54 * fs * max(len(text), 1))
+def _overlay_scale(canvas_w: int) -> float:
+    """Keep overlay type large on 720–864 sources; do not shrink with the frame."""
+    return max(0.94, min(1.12, canvas_w / 1080.0))
 
 
-def _fit_fs(text: str, max_fs: int, usable: int = D.USABLE_W) -> int:
+def _ellipse_path(rx: int, ry: int) -> str:
+    return (
+        f"m {-rx} 0 b {-rx} {-ry} {rx} {-ry} {rx} 0 "
+        f"b {rx} {ry} {-rx} {ry} {-rx} 0"
+    )
+
+
+def _star_path(r: int = 10) -> str:
+    inner = max(3, int(r * 0.28))
+    return (
+        f"m 0 {-r} l {inner} {-inner} l {r} 0 l {inner} {inner} "
+        f"l 0 {r} l {-inner} {inner} l {-r} 0 l {-inner} {-inner}"
+    )
+
+
+def _blob_path() -> str:
+    return (
+        "m -20 8 b -90 10 -122 -8 -118 -36 b -108 -72 -42 -90 6 -84 "
+        "b 72 -92 130 -52 120 -14 b 110 22 58 50 6 46 b -52 50 -92 34 -20 8"
+    )
+
+
+def _lines_from_caption(
+    caption: Caption, *, max_chars: int
+) -> list[list[CaptionWord]]:
+    raw = (caption.text or "").replace("\\n", "\n")
+    words = _caption_words(caption)
+    if "\n" in raw and words:
+        lines: list[list[CaptionWord]] = []
+        idx = 0
+        for part in raw.split("\n"):
+            n = len([tok for tok in part.split() if tok]) or 1
+            chunk = words[idx : idx + n]
+            if chunk:
+                lines.append(chunk)
+            idx += n
+        if idx < len(words):
+            extra = words[idx:]
+            if lines:
+                lines[-1].extend(extra)
+            else:
+                lines.append(extra)
+        return [line for line in lines if line]
+    return _wrap_caption_words(caption, max_chars=max_chars, max_lines=2)
+
+
+def _sans_tag(fs: int) -> str:
+    return (
+        rf"{{\fn{D.FONT_CAPTION_SANS}\fs{fs}\b1\i0\c&H00FFFFFF&"
+        rf"\3c{D.CAPTION_OUTLINE}&\bord5\shad2}}"
+    )
+
+
+def _serif_tag(fs: int, *, italic: bool = False) -> str:
+    italic_flag = 1 if italic else 0
+    return (
+        rf"{{\fn{D.FONT_CAPTION_SERIF}\fs{fs}\b0\i{italic_flag}"
+        rf"\c{D.CAPTION_CREAM}&\3c{D.CAPTION_OUTLINE}&\bord3\shad1}}"
+    )
+
+
+def _soft_in() -> str:
+    return r"{\fad(70,90)\fscx96\fscy96\t(0,180,0.45,\fscx100\fscy100)}"
+
+
+def _mix_line(line_words: list[CaptionWord], *, body_fs: int, serif_fs: int) -> str:
+    parts: list[str] = []
+    for word in line_words:
+        token = _escape_ass(word.text)
+        if word.emphasis:
+            parts.append(_serif_tag(serif_fs) + token)
+        else:
+            parts.append(_sans_tag(body_fs) + token)
+    return " ".join(parts)
+
+
+def _serif_line(line_words: list[CaptionWord], *, fs: int, italic: bool = False) -> str:
+    text = " ".join(_escape_ass(w.text) for w in line_words)
+    return _serif_tag(fs, italic=italic) + text
+
+
+def _sans_line(line_words: list[CaptionWord], *, fs: int) -> str:
+    text = " ".join(_escape_ass(w.text) for w in line_words)
+    return _sans_tag(fs) + text
+
+
+def _overlay_caption_events(
+    caption: Caption,
+    *,
+    overlay_y: int,
+    head_top: int,
+    canvas_w: int,
+    theme: D.Theme | None = None,
+) -> list[str]:
+    _ = theme
+    scale = _overlay_scale(canvas_w)
+    treatment = caption.treatment or "plain"
+    if treatment == "plain" and any(w.emphasis for w in caption.words):
+        treatment = "mix"
+    body_fs = max(D.FS_OVERLAY_MIN, int(D.FS_OVERLAY_BODY * scale))
+    serif_fs = max(body_fs + 28, int(D.FS_OVERLAY_HOT * scale))
+    if treatment in {"serif", "quote", "oval", "underline", "blob"}:
+        serif_fs = max(serif_fs, int(D.FS_OVERLAY_HOOK * scale))
+        body_fs = serif_fs
+    usable = max(220, canvas_w - 64)
+    target = serif_fs if treatment != "plain" else body_fs
+    max_chars = max(8, min(13, int(usable / max(target * 0.52, 1))))
+    wrapped = _wrap_caption_words(caption, max_chars=max_chars, max_lines=3)
+    if not wrapped:
+        return []
+    longest = max((" ".join(w.text for w in line) for line in wrapped), default="", key=len)
+    if treatment in {"serif", "quote", "oval", "underline", "blob"}:
+        serif_fs = _fit_fs(
+            longest, serif_fs, usable, min_fs=D.FS_OVERLAY_MIN, serif=True
+        )
+        body_fs = serif_fs
+    else:
+        body_fs = _fit_fs(longest, body_fs, usable, min_fs=D.FS_OVERLAY_MIN)
+        serif_fs = max(serif_fs, body_fs + 36)
+        hot_token = max(
+            (w.text for line in wrapped for w in line if w.emphasis),
+            default="W",
+            key=len,
+        )
+        serif_fs = _fit_fs(
+            hot_token,
+            serif_fs,
+            usable,
+            min_fs=body_fs + 20,
+            serif=True,
+        )
+
+    cx = canvas_w // 2
+    line_h = int(max(body_fs, serif_fs) * 1.12)
+    margin = max(20, canvas_w // 20)
+    clip_bottom = max(overlay_y + 28, head_top - 4)
+    clip = rf"\clip({margin},8,{canvas_w - margin},{clip_bottom})"
+    pos = rf"{{\an2\pos({cx},{overlay_y}){clip}}}"
+    anim = _soft_in()
+
+    chunks: list[str] = []
+    if treatment == "stack":
+        for i, line_words in enumerate(wrapped):
+            if i == 0:
+                chunks.append(_serif_line(line_words, fs=serif_fs))
+            else:
+                chunks.append(_sans_line(line_words, fs=body_fs))
+    elif treatment == "mix":
+        for line_words in wrapped:
+            chunks.append(_mix_line(line_words, body_fs=body_fs, serif_fs=serif_fs))
+    elif treatment in {"serif", "oval", "underline"}:
+        for line_words in wrapped:
+            chunks.append(_serif_line(line_words, fs=serif_fs))
+    elif treatment == "quote":
+        quoted = list(wrapped)
+        if quoted:
+            first = list(quoted[0])
+            last = list(quoted[-1])
+            if first:
+                first[0] = first[0].model_copy(update={"text": "“" + first[0].text})
+                quoted[0] = first
+            if last:
+                last[-1] = last[-1].model_copy(update={"text": last[-1].text + "”"})
+                quoted[-1] = last
+        for line_words in quoted:
+            chunks.append(_serif_line(line_words, fs=serif_fs))
+    elif treatment == "blob":
+        for i, line_words in enumerate(wrapped):
+            if i == 0:
+                chunks.append(_serif_line(line_words, fs=serif_fs, italic=True))
+            else:
+                chunks.append(_serif_line(line_words, fs=body_fs))
+    else:
+        for line_words in wrapped:
+            chunks.append(_sans_line(line_words, fs=body_fs))
+
+    body = r"\N".join(chunks)
+    events = [
+        _dialogue(
+            caption.start,
+            caption.end,
+            "Default" if treatment not in {"serif", "quote", "oval", "underline", "blob"} else "CapSerif",
+            pos + anim + body,
+            5,
+        )
+    ]
+
+    n_lines = max(len(wrapped), 1)
+    block_h = max(line_h, int(serif_fs * 1.02)) * n_lines
+    cy = overlay_y - int(block_h * 0.48)
+    text_w = _text_width(
+        longest,
+        serif_fs if treatment != "plain" else body_fs,
+        serif=treatment != "plain",
+    )
+
+    if treatment == "oval":
+        rx = max(82, min(int(text_w / 2 + 36 * scale), canvas_w // 2 - 36))
+        ry = max(38, int(max(serif_fs * 0.78, block_h * 0.58)))
+        oval = (
+            rf"{{\an5\pos({cx},{cy})\p1\bord{2.8 * scale:.1f}\shad0"
+            rf"\1a&HFF&\3c&H00FFFFFF&\fad(90,90)}}"
+            + _ellipse_path(rx, ry)
+        )
+        events.insert(0, _dialogue(caption.start, caption.end, "CapDraw", oval, 4))
+        spark = _star_path(max(8, int(12 * scale)))
+        for dx, dy in ((-rx + 12, -ry + 8), (rx - 10, ry - 8)):
+            star = (
+                rf"{{\an5\pos({cx + dx},{cy + dy})\p1\bord0\shad0\c{D.CAPTION_CREAM}&"
+                rf"\fad(120,90)}}" + spark
+            )
+            events.insert(0, _dialogue(caption.start, caption.end, "CapDraw", star, 3))
+    elif treatment == "underline":
+        uw = max(90, min(text_w, canvas_w - 2 * margin))
+        uy = overlay_y + int(10 * scale)
+        rule = (
+            rf"{{\an5\pos({cx},{uy})\p1\bord0\shad0\c{D.CAPTION_CREAM}&"
+            rf"\fad(140,90)}}m {-uw // 2} 0 l {uw // 2} 0 l {uw // 2} {max(3, int(4 * scale))} "
+            f"l {-uw // 2} {max(3, int(4 * scale))}"
+        )
+        diamond = (
+            rf"{{\an5\pos({cx},{uy + int(12 * scale)})\p1\bord0\shad0"
+            rf"\c{D.CAPTION_CREAM}&\fad(160,90)}}" + _star_path(max(7, int(10 * scale)))
+        )
+        events.insert(0, _dialogue(caption.start, caption.end, "CapDraw", rule, 4))
+        events.insert(0, _dialogue(caption.start, caption.end, "CapDraw", diamond, 4))
+    elif treatment == "blob":
+        blob_s = max(1.05, scale * 1.15)
+        blob = (
+            rf"{{\an5\pos({cx},{cy})\p1\bord0\shad0\c{D.CAPTION_BLOB}&"
+            rf"\fscx{int(100 * blob_s)}\fscy{int(100 * blob_s)}\fad(80,90)}}"
+            + _blob_path()
+        )
+        events.insert(0, _dialogue(caption.start, caption.end, "CapBlob", blob, 3))
+    return events
+
+
+def _text_width(text: str, fs: int, *, serif: bool = False) -> int:
+    em = 0.50 if serif else 0.56
+    return int(em * fs * max(len(text.replace(" ", "")), 1) + 0.28 * fs * text.count(" "))
+
+
+def _fit_fs(
+    text: str,
+    max_fs: int,
+    usable: int = D.USABLE_W,
+    min_fs: int = D.FS_TITLE_MIN,
+    *,
+    serif: bool = False,
+) -> int:
     fs = max_fs
-    while fs > D.FS_TITLE_MIN and _text_width(text, fs) > usable:
+    floor = max(min_fs, 48)
+    while fs > floor and _text_width(text, fs, serif=serif) > usable:
         fs -= 2
     return fs
 
@@ -1434,12 +1691,24 @@ def _graphic_styles(th: D.Theme) -> list[str]:
     ]
 
 
-def _styles(*, layout: str, font_name: str, th: D.Theme) -> list[str]:
+def _styles(*, layout: str, font_name: str, th: D.Theme, width: int = 1080) -> list[str]:
+    ml = max(28, width // 18)
     if layout == "overlay":
         return [
-            f"Style: Default,{font_name},72,"
-            f"&H00FFFFFF,&H0000FFFF,&H00101010,&H80000000,"
-            f"-1,0,0,0,100,100,1.2,0,1,6,2,8,72,72,64,1"
+            f"Style: Default,{D.FONT_CAPTION_SANS},{D.FS_OVERLAY_BODY},"
+            f"&H00FFFFFF,&H0000FFFF,{D.CAPTION_OUTLINE},{D.CAPTION_SHADOW},"
+            f"-1,0,0,0,100,100,0.15,0,1,5,3,2,{ml},{ml},24,1",
+            f"Style: CapSerif,{D.FONT_CAPTION_SERIF},{D.FS_OVERLAY_HOT},"
+            f"{D.CAPTION_CREAM},&H0000FFFF,{D.CAPTION_OUTLINE},{D.CAPTION_SHADOW},"
+            f"0,0,0,0,100,100,0.1,0,1,3,2,2,{ml},{ml},24,1",
+            _style(
+                "CapDraw", D.FONT_REGULAR, 10, "&H00FFFFFF",
+                outline_color="&H00FFFFFF", outline=2, align=5,
+            ),
+            _style(
+                "CapBlob", D.FONT_REGULAR, 10, D.CAPTION_BLOB,
+                outline=0, align=5,
+            ),
         ]
     if layout == "full":
         light = th.name in {"paper", "ivory"}
@@ -1481,7 +1750,7 @@ def write_ass_file(
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = layout or ("split" if split_layout else "overlay")
-    timeline = explode_caption_timeline(timeline)
+    timeline = explode_caption_timeline(timeline, video_duration=video_duration or None)
 
     lines = [
         "[Script Info]",
@@ -1497,7 +1766,7 @@ def write_ass_file(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding",
-        *_styles(layout=mode, font_name=font_name, th=th),
+        *_styles(layout=mode, font_name=font_name, th=th, width=width),
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -1521,11 +1790,22 @@ def write_ass_file(
     elif mode == "full":
         lines.extend(_graphic_events(graphics or [], height, th, full=True))
 
-    uppercase = mode == "overlay"
+    uppercase = False
     seam_y = split_panel_sizes(height)[0] if mode == "split" else 960
     overlay_y = _overlay_caption_y(head_top or int(height * 0.30), height)
     clip_head = head_top or overlay_y + 80
     for cap in _dedupe_overlaps(list(timeline.captions)):
+        if mode == "overlay":
+            lines.extend(
+                _overlay_caption_events(
+                    cap,
+                    overlay_y=overlay_y,
+                    head_top=clip_head,
+                    canvas_w=width,
+                    theme=th,
+                )
+            )
+            continue
         text = _styled_caption_text(
             cap,
             uppercase=uppercase,

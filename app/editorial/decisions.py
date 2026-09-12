@@ -62,23 +62,32 @@ class EditorialIntelligenceEngine:
         split_layout: bool | None = None,
     ) -> EditTimeline:
         jid = job_id[:8]
-        _ = split_layout
+        use_split = bool(split_layout)
         zooms = []
         logger.info("[%s] zooms: off", jid)
-        broll = await self.broll_agent.plan(analysis)
-        cuts = await self.cut_agent.plan(analysis)
-        graphics = await self.graphics_agent.plan(
-            analysis,
-            video_duration=video_duration,
-            job_id=job_id,
-        )
-        logger.info("[%s] graphics: %s cards", jid, len(graphics))
-        sfx = await self.sfx_agent.plan(
-            analysis,
-            graphics,
-            video_duration=video_duration,
-            job_id=job_id,
-        )
+        if use_split:
+            broll = await self.broll_agent.plan(analysis)
+            cuts = await self.cut_agent.plan(analysis)
+            graphics = await self.graphics_agent.plan(
+                analysis,
+                video_duration=video_duration,
+                job_id=job_id,
+            )
+            logger.info("[%s] graphics: %s cards", jid, len(graphics))
+            sfx = await self.sfx_agent.plan(
+                analysis,
+                graphics,
+                video_duration=video_duration,
+                job_id=job_id,
+            )
+        else:
+            from app.editorial.sfx.planner import plan_overlay_sfx
+
+            broll = []
+            cuts = []
+            graphics = []
+            sfx = plan_overlay_sfx(captions, video_duration=video_duration)
+            logger.info("[%s] overlay: captions only, no graphic cards", jid)
         logger.info("[%s] sfx: %s hits", jid, len(sfx))
         timeline = EditTimeline(
             captions=list(captions.captions),
