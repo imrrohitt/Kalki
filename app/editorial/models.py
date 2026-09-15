@@ -241,7 +241,7 @@ GraphicKind = Literal[
     "bullets",
 ]
 GraphicMotion = Literal["fade", "slide_up", "scale_in"]
-SfxKind = Literal["whoosh", "swoosh", "impact", "hit"]
+SfxKind = Literal["whoosh", "swoosh", "impact", "hit", "riser", "shimmer"]
 
 
 class SfxHit(BaseModel):

@@ -1,14 +1,18 @@
-"""Run the full pipeline (transcribe -> editorial -> captions -> graphics -> render)
-on a local file without the API server.
+"""Run the full pipeline on a local file without the API server.
 
-Usage: python scripts/run_pipeline.py <source_video> [out_dir] [theme] [split]
-Themes: paper (default) | noir | tech | ivory
+Full-frame (default): transcribe -> caption director -> premium captions + soundtrack.
+Split: transcribe -> editorial -> captions -> graphics -> render.
+
+Usage: python scripts/run_pipeline.py <source_video> [out_dir] [theme] [split] [reference.md]
+Themes: paper (default) | noir | tech | ivory  (split layout only)
 split: false (default) | true
+reference.md: optional creator transcript/translation used as ground truth for meaning
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
@@ -17,11 +21,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.captions.agent import CaptionAgentService
+from app.captions.director import CaptionDirector
 from app.editorial.decisions import EditorialIntelligenceEngine
 from app.editorial.framing import default_visual
 from app.media.audio import extract_audio
 from app.media.probe import probe_video
 from app.renderer.ffmpeg_renderer import FFmpegRenderer
+from app.renderer.soundtrack import plan_accents
 from app.transcription.faster_whisper_provider import FasterWhisperProvider
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -64,6 +70,32 @@ async def main() -> None:
     )
 
     duration = min(info.duration, transcript.duration or info.duration)
+    if not split_layout:
+        reference = Path(sys.argv[5]).read_text(encoding="utf-8") if len(sys.argv) > 5 else ""
+        result = await CaptionDirector().direct(
+            transcript, video_duration=info.duration, job_id="local", reference_text=reference
+        )
+        (out_dir / "brief.json").write_text(
+            json.dumps(result.brief.as_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (out_dir / "captions.json").write_text(
+            result.timeline.model_dump_json(indent=2), encoding="utf-8"
+        )
+        log.info("director: %s captions %s", len(result.timeline.captions), result.metrics)
+        accents = plan_accents(result.timeline, video_duration=info.duration)
+        t_render = time.perf_counter()
+        FFmpegRenderer(split_layout=False).render_overlay_reel(
+            source_video=src,
+            caption_timeline=result.timeline,
+            output_path=str(out_dir / "output.mp4"),
+            accents=accents,
+            music_mood=result.brief.music_mood,
+            video_duration=info.duration,
+        )
+        log.info("rendered in %.1fs", time.perf_counter() - t_render)
+        audio.unlink(missing_ok=True)
+        print(f"DONE {out_dir / 'output.mp4'}")
+        return
     visual = default_visual()
     editorial = EditorialIntelligenceEngine()
 

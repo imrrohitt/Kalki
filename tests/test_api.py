@@ -48,6 +48,7 @@ def test_upload_job_status_and_result(tmp_path, monkeypatch):
     test_settings = Settings(
         storage_dir=str(tmp_path / "storage"),
         caption_font_path="assets/fonts/Montserrat-Bold.ttf",
+        caption_director_enabled=False,
     )
     monkeypatch.setattr("app.config.settings", test_settings)
     monkeypatch.setattr("app.api.routes.settings", test_settings)
@@ -365,3 +366,86 @@ def test_videos_accepts_markdown_transcript_and_skips_whisper(tmp_path, monkeypa
     stored = Path(job.transcript_path)
     assert stored.exists()
     assert "Senior" in stored.read_text(encoding="utf-8")
+
+
+def test_full_frame_video_uses_caption_director(tmp_path, monkeypatch):
+    from app.captions.director import DirectorResult, ReelBrief
+    from app.config import Settings
+
+    test_settings = Settings(
+        storage_dir=str(tmp_path / "storage"),
+        caption_font_path="assets/fonts/Montserrat-Bold.ttf",
+        music_enabled=False,
+        sfx_enabled=False,
+    )
+    monkeypatch.setattr("app.config.settings", test_settings)
+    monkeypatch.setattr("app.api.routes.settings", test_settings)
+    monkeypatch.setattr("app.pipeline.runner.settings", test_settings)
+    monkeypatch.setattr("app.renderer.ffmpeg_renderer.settings", test_settings)
+
+    transcript = Transcript(
+        language="en",
+        spoken_language="hi",
+        duration=2.0,
+        segments=[
+            Segment(
+                start=0.0,
+                end=1.2,
+                text="got the role",
+                words=[
+                    Word(word="got", start=0.0, end=0.3),
+                    Word(word="the", start=0.3, end=0.5),
+                    Word(word="role", start=0.5, end=1.0),
+                ],
+            )
+        ],
+    )
+    timeline = CaptionTimeline(
+        captions=[
+            Caption(
+                start=0.0,
+                end=1.4,
+                text="got the role",
+                treatment="serif",
+                words=[
+                    CaptionWord(text="got", start=0.0, end=0.3),
+                    CaptionWord(text="the", start=0.3, end=0.5),
+                    CaptionWord(text="role", start=0.5, end=1.4),
+                ],
+            )
+        ]
+    )
+    stt = MagicMock()
+    stt.transcribe = AsyncMock(return_value=transcript)
+    director = MagicMock()
+    director.direct = AsyncMock(
+        return_value=DirectorResult(
+            timeline=timeline,
+            brief=ReelBrief(topic="t", music_mood="calm_reflective"),
+            drafts=[],
+        )
+    )
+    agent = MagicMock()
+    agent.generate = AsyncMock(side_effect=AssertionError("old caption agent must not run"))
+    routes._pipeline = Pipeline(stt=stt, caption_agent=agent, director=director)
+
+    app = create_app()
+    video = tmp_path / "clip.mp4"
+    _make_video(video)
+    with TestClient(app) as client:
+        with video.open("rb") as f:
+            body = client.post("/api/v1/videos", files={"file": ("clip.mp4", f, "video/mp4")}).json()
+        job_id = body["job_id"]
+        status = None
+        for _ in range(80):
+            status = client.get(f"/api/v1/jobs/{job_id}").json()
+            if status["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.1)
+        assert status is not None and status["status"] == "completed", status
+        assert status["metrics"]["music_mood"] == "calm_reflective"
+        job_dir = Path(body["job_dir"])
+        assert (job_dir / "brief.json").is_file()
+        assert (job_dir / "captions.json").is_file()
+        assert Path(body["output_path"]).is_file()
+    director.direct.assert_awaited_once()

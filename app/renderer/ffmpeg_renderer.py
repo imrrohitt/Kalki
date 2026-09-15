@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 from pathlib import Path
 
@@ -200,6 +201,154 @@ class FFmpegRenderer:
             raise MediaError("ffmpeg not found. Install FFmpeg.") from exc
         except subprocess.CalledProcessError as exc:
             raise MediaError(f"render failed: {exc.stderr[-1000:]}") from exc
+        return output_path
+
+    def overlay_size(self, source_video: str) -> tuple[int, int]:
+        """Source aspect, upscaled so captions rasterize at delivery width."""
+        info = probe_video(source_video)
+        w, h = info.display_width, info.display_height
+        target_w = max(w, settings.overlay_min_width)
+        if target_w != w:
+            h = int(round(h * target_w / w))
+            w = target_w
+        return w - (w % 2), h - (h % 2)
+
+    def _sample_band(self, source_video: str, *, width: int, height: int, top: int, bottom: int, duration: float) -> list:
+        import numpy as np
+
+        small_w = 216
+        small_h = max(2, int(round(height * small_w / width)))
+        y0 = int(top * small_h / height)
+        y1 = max(y0 + 1, int(bottom * small_h / height))
+        frames = []
+        for frac in (0.15, 0.45, 0.75):
+            cmd = [
+                settings.ffmpeg_path, "-v", "error", "-ss", f"{max(0.0, duration * frac):.2f}",
+                "-i", source_video, "-frames:v", "1",
+                "-vf", f"scale={small_w}:{small_h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ]
+            raw = subprocess.run(cmd, capture_output=True).stdout
+            if len(raw) == small_w * small_h * 3:
+                frame = np.frombuffer(raw, np.uint8).reshape(small_h, small_w, 3)
+                frames.append(frame[y0:y1].astype(np.float32))
+        return frames
+
+    def render_overlay_reel(
+        self,
+        *,
+        source_video: str,
+        caption_timeline: CaptionTimeline,
+        output_path: str,
+        accents: list[SfxHit] | None = None,
+        music_mood: str = "warm_inspiring",
+        video_duration: float = 0.0,
+    ) -> str:
+        """Full-frame talking head with the premium caption layer and soundtrack."""
+        import tempfile
+
+        from app.renderer.caption_layer import CaptionLayer, band_is_bright
+        from app.renderer.soundtrack import (
+            build_soundtrack,
+            pick_music_track,
+            synthesize_music_bed,
+        )
+
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        info = probe_video(source_video)
+        duration = video_duration or info.duration
+        out_w, out_h = self.overlay_size(source_video)
+        head_top = detect_head_top(source_video, width=out_w, height=out_h)
+        layer = CaptionLayer(
+            caption_timeline, width=out_w, height=out_h, fps=self.fps, head_top=head_top
+        )
+        bright = band_is_bright(
+            self._sample_band(
+                source_video,
+                width=out_w,
+                height=out_h,
+                top=layer.band_top,
+                bottom=layer.band_top + layer.band_height,
+                duration=duration,
+            )
+        )
+        layer = CaptionLayer(
+            caption_timeline,
+            width=out_w,
+            height=out_h,
+            fps=self.fps,
+            head_top=head_top,
+            bright_background=bright,
+        )
+        n_frames = int(math.ceil(duration * self.fps))
+
+        music_path: Path | None = None
+        synthesized: Path | None = None
+        if settings.music_enabled:
+            music_path = pick_music_track(music_mood)
+            if music_path is None:
+                synthesized = out.parent / "music_bed.wav"
+                music_path = synthesize_music_bed(music_mood, duration, synthesized)
+
+        cmd = [
+            settings.ffmpeg_path, "-y", "-i", source_video,
+            "-f", "rawvideo", "-pix_fmt", "rgba",
+            "-s", f"{out_w}x{layer.band_height}", "-framerate", str(self.fps),
+            "-i", "pipe:0",
+        ]
+        audio_graph = ""
+        if info.has_audio:
+            files, audio_graph = build_soundtrack(
+                voice_input=0,
+                first_extra_input=2,
+                hits=list(accents or []) if settings.sfx_enabled else [],
+                music_path=music_path,
+                video_duration=duration,
+                cache_dir=settings.storage_path / "cache",
+            )
+            for path in files:
+                cmd.extend(["-i", str(path)])
+        video_graph = (
+            f"[0:v]scale={out_w}:{out_h}:flags=lanczos,fps={self.fps},setsar=1,format=yuv420p[base];"
+            "[1:v]format=yuva420p[cap];"
+            f"[base][cap]overlay=0:{layer.band_top}:eof_action=pass:format=yuv420,format=yuv420p[vout]"
+        )
+        graph = f"{video_graph};{audio_graph}" if audio_graph else video_graph
+        cmd.extend(["-filter_complex", graph, "-map", "[vout]"])
+        cmd.extend(["-map", "[aout]"] if audio_graph else [])
+        cmd.extend(["-t", f"{duration:.3f}"])
+        cmd.extend(self._encode_args())
+        cmd.append(output_path)
+
+        logger.info(
+            "ffmpeg overlay-reel %sx%s band=%s@%s bright=%s captions=%s accents=%s music=%s",
+            out_w, out_h, layer.band_height, layer.band_top, bright,
+            len(caption_timeline.captions), len(accents or []),
+            music_path.name if music_path else None,
+        )
+        with tempfile.TemporaryFile() as err:
+            try:
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err, stdout=subprocess.DEVNULL)
+            except FileNotFoundError as exc:
+                raise MediaError("ffmpeg not found. Install FFmpeg.") from exc
+            assert proc.stdin is not None
+            try:
+                for buf in layer.iter_frames(n_frames):
+                    proc.stdin.write(buf)
+            except BrokenPipeError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
+            code = proc.wait()
+            if code != 0:
+                err.seek(0)
+                tail = err.read().decode("utf-8", "replace")[-1500:]
+                raise MediaError(f"render failed: {tail}")
+        if synthesized is not None:
+            synthesized.unlink(missing_ok=True)
         return output_path
 
     def render_audio_reel(

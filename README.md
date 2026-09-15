@@ -29,7 +29,9 @@
 
 ---
 
-Upload a clip or an audio file. The pipeline transcribes with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), runs a chain of Google ADK agents (DeepSeek via LiteLLM), and composites a vertical reel: kinetic captions, motion-graphics cards, and timed SFX. Talking-head jobs are full-frame by default (captions and zooms on the speaker). Pass `split_screen=true` to put graphics on top and the speaker below.
+Upload a clip or an audio file. The pipeline transcribes with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), runs a DeepSeek **caption director**, and composites a vertical reel: premium editorial captions, a quiet music bed, and a few timed accents.
+
+Full-frame talking-head reels (the default) use the caption director and a Pillow-rasterized caption layer. Pass `split_screen=true` for the older split canvas with motion-graphics cards and Google ADK agents.
 
 Two products, one engine:
 
@@ -39,6 +41,56 @@ Two products, one engine:
 | **Layout** | Full-frame 9:16 (default). Split canvas when `split_screen=true` | Full-frame 1080×1920 motion graphics |
 | **Endpoint** | `POST /api/v1/videos` | `POST /api/v1/reels` |
 | **CLI** | `scripts/run_pipeline.py` | `scripts/run_reel.py` |
+
+## The caption director
+
+Hindi, Hinglish or English speech, in; a designed English caption track, out.
+
+1. **Transcribe** — faster-whisper. Non-English speech is decoded straight to
+   English so word timings survive translation (`WHISPER_OUTPUT_LANGUAGE=en`).
+2. **Brief** (thinking) — topic, hook, music mood, key ideas, a glossary of
+   mishearings (`cloud` → `Claude`), and a corrected transcript.
+3. **Script** — every segment becomes short spoken lines of 1–4 words. Machine
+   checks reject condensed, invented or over-long lines and retry with the exact
+   problem ("segment 4 drops spoken words: alternatives, trade-offs").
+4. **Review** — one pass over the whole edit for meaning and flow.
+5. **Annotate** — per line: the key word, an importance weight, and a kind
+   (payoff, concept, term, drama, quote).
+6. **Craft** (deterministic, `app/captions/craft.py`) — turns judgement into the
+   look and guarantees the rhythm: lines aligned onto real word timings, a serif
+   payoff about every 7 s, hand-drawn accents about every 20 s, never the same
+   accent twice, never four plain lines in a row, nothing on screen under 0.7 s.
+
+| Treatment | What it is | When it fires |
+| --- | --- | --- |
+| `plain` | White Montserrat | Connective speech |
+| `mix` | White sans + one cream Playfair word | The meaningful noun or verb |
+| `serif` | Whole line in cream serif | A payoff or contrast |
+| `stack` | Big cream serif hook + white sans line under it | The opening beat |
+| `quote` | Cream serif in curly quotes | A rule of thumb |
+| `oval` | Cream serif circled by a drawn oval with sparkles | The key concept of a beat |
+| `underline` | Hairline rule with a sparkle | A concrete key term |
+| `tape` | Dark serif on a torn sage tape sticker | One dramatic word |
+
+Type is rasterized with Pillow at delivery width (`OVERLAY_MIN_WIDTH`, default
+1080), baseline-aligned across mixed fonts, with photographic shadows that get
+stronger on bright walls. The layer is streamed to FFmpeg as a transparent RGBA
+band and overlaid just above the speaker's head.
+
+## Sound
+
+Premium reels are quiet: a bed under the whole voice and a handful of accents,
+never a hit per word.
+
+- **Music** — licensed tracks in `MUSIC_DIR` win (mood words in the filename help
+  the picker). Otherwise a warm ambient bed is synthesized for the director's
+  mood — pads and a soft arpeggio, no drums — so every reel has a bed with no
+  licensing risk. It is ducked under the voice with a sidechain compressor and
+  sits ~18 dB below it.
+- **Accents** — a soft riser on the hook, a synthesized sparkle when an oval or
+  underline lands, a swoosh under tape. At most one per 12 s.
+- **Voice** — high-pass, gentle compression, and the whole mix normalized to
+  −15 LUFS / −1.5 dBTP.
 
 ## Sample output
 
@@ -129,7 +181,7 @@ The graphics planner picks a card kind from the sentence — hook, contrast, num
 | `process` / `diagram` | A sequence of steps |
 | `quote` / `topic` | A take, a line worth holding |
 
-Captions sit on the picture: Montserrat, two-line grouping, keyword color from the theme. SFX hits (`whoosh`, `swoosh`, `impact`, `hit`) land on card changes from `Sound Effects V4`. Full-frame talking-head jobs also get scored punch-in zooms; split-screen jobs keep the full face instead.
+These cards are the split-screen and audio-reel look. SFX hits (`whoosh`, `swoosh`, `impact`, `hit`) land on card changes from `Sound Effects V4`. Full-frame talking-head reels do not use cards: they use the caption director above.
 
 ## Pipeline
 
@@ -137,16 +189,19 @@ Captions sit on the picture: Montserrat, two-line grouping, keyword color from t
 flowchart LR
   A[Upload] --> B[Probe + normalize]
   B --> C[faster-whisper]
-  C --> D[Transcript repair]
-  D --> E[Editorial analysis]
-  E --> F[Captions]
-  E --> G[Scenes / graphics]
-  E --> H[SFX]
-  F --> I[FFmpeg]
-  G --> I
-  H --> I
-  I --> J["1080×1920 MP4"]
+  C --> D[Brief]
+  D --> E[Script]
+  E --> F[Review]
+  F --> G[Annotate]
+  G --> H[Craft: timing + design]
+  H --> I[Caption layer → FFmpeg]
+  H --> J[Soundtrack]
+  J --> I
+  I --> K["9:16 MP4"]
 ```
+
+Split-screen jobs keep the older route: transcript repair → editorial analysis →
+caption agent → graphics + SFX → FFmpeg.
 
 1. **Probe** — duration, codec, sample rate. Reject or cap by `MAX_VIDEO_DURATION_SEC`.
 2. **Transcribe** — faster-whisper with VAD. Word-level timestamps.
@@ -204,6 +259,10 @@ Audio reel:
 curl -F "file=@talk.wav" "http://127.0.0.1:8000/api/v1/reels?theme=paper"
 ```
 
+A full-frame job writes `brief.json` (what the director understood) and
+`captions.json` (every line, its treatment, and its word reveal times) next to the
+MP4, so an edit can be inspected or hand-tuned without re-running the LLM.
+
 Poll `GET /api/v1/jobs/{job_id}` until `status` is `completed`, then download `GET /api/v1/jobs/{job_id}/result`.
 
 `POST /videos` and `POST /reels` return a `job_id` UUID immediately. That same UUID is the folder under `storage/jobs/`. The finished MP4 is stored there as `output.mp4`:
@@ -242,7 +301,7 @@ Query params on the upload endpoints (`theme`, `split_screen`) are the per-job o
 | `theme` | `/videos`, `/reels` | `GRAPHICS_THEME` (`paper`) | `paper` · `noir` · `tech` · `ivory` |
 | `split_screen` | `/videos` | `false` | `true` / `false` — split layout only when `true` |
 
-Job stages: `uploaded` → `validating` → `extracting_audio` → `transcribing` → `repairing_transcript` → `analyzing_editorial` → `generating_captions` → `planning_edits` → `rendering` → `completed`.
+Job stages: `uploaded` → `validating` → `extracting_audio` → `transcribing` → `generating_captions` → `planning_edits` → `rendering` → `completed`. Split-screen and audio jobs also pass through `repairing_transcript` and `analyzing_editorial`.
 
 ## Configuration
 
@@ -261,9 +320,16 @@ Copy `.env.example`. The values that change the picture:
 | `TRANSCRIPT_REPAIR_LLM_ENABLED` | `true` | Whisper typo pass |
 | `SCENES_LLM_ENABLED` | `true` | Audio-reel scene director |
 | `CAPTION_FONT_PATH` | `assets/fonts/Montserrat-*.ttf` | On-canvas type |
+| `DEEPSEEK_KEY_FILE` | `deepseek_key.txt` | Plain-text key file; wins over `LLM_API_KEY` |
+| `DIRECTOR_MODEL` | `deepseek-v4-pro` | Caption director |
+| `CAPTION_DIRECTOR_ENABLED` | `true` | Full-frame reels; `false` falls back to the old agent |
+| `WHISPER_OUTPUT_LANGUAGE` | `en` | Decode target. Keeps timings on Hindi / Hinglish speech |
+| `OVERLAY_MIN_WIDTH` | `1080` | Captions rasterize at least this wide |
+| `MUSIC_ENABLED` / `MUSIC_DIR` / `MUSIC_GAIN_DB` | `true` / `assets/music` / `-32` | Bed under the voice |
 | `STORAGE_DIR` | `storage` | Uploads, jobs, artifacts |
 
-Caption-agent thinking is disabled for DeepSeek V4. Do not set `reasoning_effort`.
+The director runs thinking only for the brief; the per-line passes run without it
+(thinking costs minutes per chunk for no gain on those). Do not set `reasoning_effort`.
 
 ## Layout
 
@@ -280,6 +346,8 @@ app/
     zoom/                    Punch-in scoring
   captions/                  Grouped on-screen lines
   renderer/
+    caption_layer.py         Pillow caption frames piped to FFmpeg
+    soundtrack.py            Music bed, accents, ducking, loudness
     design.py                Themes and tokens
     canvas.py                Full-frame scenes
     split.py                 Talking-head split

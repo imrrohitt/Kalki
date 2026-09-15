@@ -1,0 +1,766 @@
+"""Deterministic caption craft: coverage, timing, word reveal, and design restraint.
+
+The director agent decides *what* a caption says and how it should look. This
+module makes sure the result is always renderable and always tasteful: every
+spoken word is covered once, captions follow the voice, special treatments stay
+rare, and word reveal times come from the real ASR timings.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
+
+from app.asr import stabilize_copy
+from app.captions.models import Caption, CaptionTimeline, CaptionWord
+from app.transcription.models import Word
+
+STYLE_NAMES = ("plain", "mix", "serif", "stack", "quote", "oval", "underline", "tape")
+MUSIC_MOODS = (
+    "warm_inspiring",
+    "focused_tech",
+    "calm_reflective",
+    "confident_upbeat",
+    "serious_story",
+)
+
+# Seconds between two captions of the same special style.
+STYLE_MIN_GAP = {
+    "oval": 18.0,
+    "underline": 14.0,
+    "tape": 50.0,
+    "quote": 12.0,
+    "stack": 25.0,
+    "serif": 4.5,
+}
+# Big cream moments never sit back to back.
+BIG_STYLES = {"serif", "quote", "oval", "tape", "stack"}
+BIG_MIN_GAP = 2.4
+MAX_WORDS = {
+    "plain": 5,
+    "mix": 5,
+    "serif": 4,
+    "stack": 4,
+    "quote": 5,
+    "oval": 3,
+    "underline": 4,
+    "tape": 3,
+}
+MAX_CAPTION_SECONDS = 3.4
+
+ACRONYMS = {
+    "AI", "RAG", "LLM", "LLMS", "API", "APIS", "GPU", "CPU", "SQL", "UI", "UX", "ML",
+    "CEO", "CTO", "IT", "AWS", "GCP", "GDPR", "PEFT", "LORA", "NLP", "SDK", "OK",
+    "HR", "DSA", "SDE", "CV", "PR", "US", "USA", "UK", "PDF", "JSON", "HTTP",
+}
+FILLER = {
+    "a", "an", "the", "is", "am", "are", "was", "were", "be", "to", "of", "in", "on",
+    "at", "for", "and", "or", "but", "so", "that", "this", "it", "its", "i", "you",
+    "we", "they", "he", "she", "my", "your", "very", "really", "just", "thing",
+    "things", "like", "basically", "actually", "then", "there", "here", "what",
+    "how", "all", "about", "with", "do", "did", "does", "have", "has", "had",
+}
+GREETINGS = {"hi", "hello", "hey", "namaste", "guys", "everyone", "friends"}
+_WORD_RE = re.compile(r"[^a-z0-9]+")
+
+
+@dataclass(frozen=True)
+class CaptionDraft:
+    first: int
+    last: int
+    text: str
+    sub: str = ""
+    style: str = "plain"
+    emphasis: str = ""
+
+    @property
+    def tokens(self) -> list[str]:
+        return self.text.split()
+
+    @property
+    def sub_tokens(self) -> list[str]:
+        return self.sub.split()
+
+
+def norm_token(token: str) -> str:
+    return _WORD_RE.sub("", token.lower())
+
+
+def fix_case(text: str) -> str:
+    """Spoken sentence case guard: no shouting, no Title Case."""
+    tokens = text.split()
+    if not tokens:
+        return text
+    out: list[str] = []
+    for tok in tokens:
+        core = re.sub(r"[^A-Za-z]", "", tok)
+        if len(core) > 1 and core.isupper() and core.upper() not in ACRONYMS:
+            tok = tok.lower()
+        out.append(tok)
+    alpha = [re.sub(r"[^A-Za-z]", "", t) for t in out]
+    # "I" and acronyms are capitalized in any case; judge the other words.
+    judged = [a for a in alpha if a and a.upper() not in ACRONYMS and a != "I"]
+    titled = [a for a in judged if a[0].isupper()]
+    if len(out) >= 3 and len(judged) >= 2 and len(titled) == len(judged):
+        out = [out[0]] + [
+            t if re.sub(r"[^A-Za-z]", "", t).upper() in ACRONYMS or t in {"I", "I'm", "I've", "I'll", "I'd"}
+            else t.lower()
+            for t in out[1:]
+        ]
+    return " ".join(out)
+
+
+def clean_copy(text: str) -> str:
+    text = stabilize_copy(text.replace("\n", " "))
+    text = text.strip().strip("\"“”")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[.;:\u2014\u2013-]+$", "", text).strip()
+    return fix_case(text)
+
+
+def _content_word(tokens: list[str]) -> str:
+    best = ""
+    for tok in tokens:
+        core = norm_token(tok)
+        if core and core not in FILLER and len(core) >= len(norm_token(best)):
+            best = tok.strip(",?!")
+    return best
+
+
+def _emphasis_ok(text: str, emphasis: str) -> bool:
+    if not emphasis:
+        return False
+    tokens = [norm_token(t) for t in text.split()]
+    wanted = [norm_token(t) for t in emphasis.split() if norm_token(t)]
+    if not wanted or len(wanted) > 2:
+        return False
+    if all(w in FILLER for w in wanted):
+        return False
+    for i in range(len(tokens) - len(wanted) + 1):
+        if tokens[i : i + len(wanted)] == wanted:
+            return True
+    return False
+
+
+def _downgrade(d: CaptionDraft) -> CaptionDraft:
+    """One step toward plain, keeping the line's best word in serif."""
+    if d.style == "oval":
+        style = "serif" if len(d.tokens) <= MAX_WORDS["serif"] else "mix"
+        return replace(d, style=style)
+    if d.style in {"tape", "quote"}:
+        return replace(d, style="serif")
+    if d.style == "stack":
+        merged = f"{d.text} {d.sub}".strip()
+        return replace(d, text=merged, sub="", style="mix", emphasis=_content_word(d.tokens))
+    if d.style in {"serif", "underline"}:
+        emphasis = d.emphasis if _emphasis_ok(d.text, d.emphasis) else _content_word(d.tokens)
+        return replace(d, style="mix" if emphasis else "plain", emphasis=emphasis)
+    return replace(d, style="plain", emphasis="")
+
+
+def _normalize_coverage(drafts: list[CaptionDraft], n_words: int) -> list[CaptionDraft]:
+    ordered = sorted((d for d in drafts if d.text.strip()), key=lambda d: (d.first, d.last))
+    fixed: list[CaptionDraft] = []
+    cursor = 0
+    for d in ordered:
+        first = max(d.first, cursor)
+        last = min(max(d.last, first), n_words - 1)
+        if first > n_words - 1 or last < first:
+            continue
+        if fixed and first > cursor:
+            # Uncovered ids between groups belong to the previous caption.
+            fixed[-1] = replace(fixed[-1], last=first - 1)
+        elif not fixed and first > 0:
+            first = 0
+        fixed.append(replace(d, first=first, last=last))
+        cursor = last + 1
+    if fixed and cursor < n_words:
+        fixed[-1] = replace(fixed[-1], last=n_words - 1)
+    return fixed
+
+
+def _split_long(d: CaptionDraft, words: list[Word]) -> list[CaptionDraft]:
+    span = words[d.last].end - words[d.first].start
+    tokens = d.tokens
+    if d.style == "stack" or len(tokens) < 4 or d.last == d.first:
+        return [d]
+    if span <= MAX_CAPTION_SECONDS and len(tokens) <= MAX_WORDS.get(d.style, 5):
+        return [d]
+    half = len(tokens) // 2
+    mid_t = words[d.first].start + span / 2
+    cut = d.first
+    for i in range(d.first, d.last):
+        if words[i + 1].start <= mid_t:
+            cut = i + 1
+    cut = min(max(cut, d.first + 1), d.last)
+    left_text = " ".join(tokens[:half])
+    right_text = " ".join(tokens[half:])
+
+    def part(first: int, last: int, text: str, style: str) -> CaptionDraft:
+        emphasis = d.emphasis if _emphasis_ok(text, d.emphasis) else ""
+        if style == "mix" and not emphasis:
+            style = "plain"
+        return CaptionDraft(first=first, last=last, text=text, style=style, emphasis=emphasis)
+
+    if d.style in BIG_STYLES:
+        # The half that carries the content keeps the serif; the other reads plain.
+        left_weight = len([t for t in tokens[:half] if norm_token(t) not in FILLER])
+        right_weight = len([t for t in tokens[half:] if norm_token(t) not in FILLER])
+        left_style, right_style = ("serif", "plain") if left_weight > right_weight else ("plain", "serif")
+    elif d.style in {"mix", "underline"}:
+        left_style = right_style = "mix"
+    else:
+        left_style = right_style = "plain"
+    left = part(d.first, cut - 1, left_text, left_style)
+    right = part(cut, d.last, right_text, right_style)
+    return _split_long(left, words) + _split_long(right, words)
+
+
+def _hook_index(
+    drafts: list[CaptionDraft], words: list[Word], notes: list[LineNote] | None = None
+) -> int:
+    """The strongest line of the first 2.5 s (designed lines win)."""
+    if not drafts:
+        return -1
+    t0 = words[drafts[0].first].start
+    window = [i for i, d in enumerate(drafts[:3]) if words[d.first].start - t0 <= 2.5] or [0]
+    for i in window:
+        if drafts[i].style in {"serif", "stack", "quote", "oval", "tape"}:
+            return i
+
+    def content(i: int) -> int:
+        return len([
+            t for t in drafts[i].tokens
+            if len(norm_token(t)) >= 3 and norm_token(t) not in FILLER | GREETINGS
+        ])
+
+    # The opener stays the hook unless it is only a greeting or filler.
+    for i in window:
+        if content(i) > 0:
+            return i
+    return window[0]
+
+
+def enforce_design_rules(drafts: list[CaptionDraft], words: list[Word]) -> list[CaptionDraft]:
+    if not words:
+        return []
+    cleaned: list[CaptionDraft] = []
+    for d in drafts:
+        style = d.style if d.style in STYLE_NAMES else "plain"
+        text = clean_copy(d.text)
+        sub = clean_copy(d.sub) if d.sub else ""
+        if not text:
+            continue
+        if style == "stack" and not sub:
+            style = "serif"
+        if style != "stack":
+            sub = ""
+        emphasis = clean_copy(d.emphasis).strip(",?!") if d.emphasis else ""
+        cleaned.append(
+            CaptionDraft(first=d.first, last=d.last, text=text, sub=sub, style=style, emphasis=emphasis)
+        )
+
+    covered = _normalize_coverage(cleaned, len(words))
+    split: list[CaptionDraft] = []
+    for d in covered:
+        split.extend(_split_long(d, words))
+
+    hook_index = _hook_index(split, words)
+    out: list[CaptionDraft] = []
+    last_style_at: dict[str, float] = {}
+    last_big_at = -99.0
+    decorated_terms: set[str] = set()
+    for index, d in enumerate(split):
+        t = words[d.first].start
+        # Length limits per look.
+        while len(d.tokens) > MAX_WORDS.get(d.style, 5) and d.style != "plain":
+            d = _downgrade(d)
+        if d.style in {"mix", "underline"} and not _emphasis_ok(d.text, d.emphasis):
+            if d.style == "mix":
+                d = replace(d, style="plain", emphasis="")
+            else:
+                d = replace(d, emphasis="")
+        if d.style == "plain" and d.emphasis:
+            d = replace(d, emphasis="")
+        # Hook: the strongest line of the first seconds is a designed moment.
+        if index == hook_index and d.style in {"plain", "mix"} and len(d.tokens) <= MAX_WORDS["serif"]:
+            d = replace(d, style="serif", emphasis="")
+        # Rarity.
+        for _ in range(4):
+            gap = STYLE_MIN_GAP.get(d.style)
+            too_soon = gap is not None and t - last_style_at.get(d.style, -99.0) < gap
+            big_clash = d.style in BIG_STYLES and t - last_big_at < BIG_MIN_GAP and index > 0
+            if not (too_soon or big_clash):
+                break
+            d = _downgrade(d)
+        # A hand-drawn accent on the same term twice looks templated.
+        if d.style in {"oval", "underline", "tape"}:
+            term = norm_token(d.emphasis or d.text)
+            if term in decorated_terms:
+                d = _downgrade(d)
+            else:
+                decorated_terms.add(term)
+        if d.style in STYLE_MIN_GAP:
+            last_style_at[d.style] = t
+        if d.style in BIG_STYLES:
+            last_big_at = t
+        out.append(d)
+    return _merge_flashes(_lift_plain_runs(out), words)
+
+
+def _lift_plain_runs(drafts: list[CaptionDraft], max_run: int = 3) -> list[CaptionDraft]:
+    """Floor for the look: a long run of plain lines gets one cream word."""
+    out = list(drafts)
+    run: list[int] = []
+    for i, d in enumerate(out + [CaptionDraft(first=0, last=0, text="_", style="mix")]):
+        if d.style == "plain" and i < len(out):
+            run.append(i)
+            continue
+        while len(run) > max_run:
+            window = run[: max_run + 1]
+            best = max(window, key=lambda k: len(norm_token(_content_word(out[k].tokens))))
+            word = _content_word(out[best].tokens)
+            if len(norm_token(word)) >= 4:
+                out[best] = replace(out[best], style="mix", emphasis=word)
+                run = run[run.index(best) + 1 :]
+            else:
+                run = run[max_run + 1 :]
+        run = []
+    return out
+
+
+def _merge_flashes(drafts: list[CaptionDraft], words: list[Word], floor: float = 0.5) -> list[CaptionDraft]:
+    """Fold a line the voice rushes through into its neighbour when both still fit."""
+    out = list(drafts)
+    i = 0
+    while i < len(out):
+        d = out[i]
+        span = words[d.last].end - words[d.first].start
+        if span >= floor or d.style == "stack" or len(out) == 1:
+            i += 1
+            continue
+        candidates = []
+        if i + 1 < len(out) and out[i + 1].style != "stack":
+            candidates.append(i + 1)
+        if i > 0 and out[i - 1].style != "stack":
+            candidates.append(i - 1)
+        merged = False
+        for j in candidates:
+            a, b = (out[i], out[j]) if j > i else (out[j], out[i])
+            tokens = a.tokens + b.tokens
+            starts_sentence = b.tokens and b.tokens[0][:1].isupper() and norm_token(b.tokens[0]) != "i"
+            if a.text.rstrip().endswith((",", ".", "?", "!")) or starts_sentence:
+                continue
+            if len(tokens) > MAX_WORDS["mix"]:
+                continue
+            keep = a if a.style != "plain" else b
+            style = keep.style if keep.style in {"plain", "mix", "serif"} else "mix"
+            emphasis = keep.emphasis if style == "mix" else ""
+            if style == "serif" and len(tokens) > MAX_WORDS["serif"]:
+                style, emphasis = "mix", _content_word(keep.tokens)
+            if style == "mix" and not _emphasis_ok(" ".join(tokens), emphasis):
+                emphasis = _content_word(tokens)
+                style = "mix" if emphasis else "plain"
+            lo, hi = min(i, j), max(i, j)
+            out[lo : hi + 1] = [
+                CaptionDraft(
+                    first=a.first, last=b.last, text=" ".join(tokens), style=style, emphasis=emphasis
+                )
+            ]
+            merged = True
+            i = lo
+            break
+        if not merged:
+            i += 1
+    return out
+
+
+LINE_KINDS = ("payoff", "concept", "term", "drama", "quote", "normal")
+
+
+@dataclass(frozen=True)
+class LineNote:
+    """The director's judgement of one line."""
+
+    key: str = ""
+    weight: int = 1
+    kind: str = "normal"
+
+
+def _strip_greeting(text: str) -> str:
+    tokens = text.split()
+    while len(tokens) > 2 and norm_token(tokens[0]) in GREETINGS:
+        tokens = tokens[1:]
+    if tokens and tokens != text.split():
+        tokens[0] = tokens[0][:1].upper() + tokens[0][1:]
+    return " ".join(tokens)
+
+
+def _key_for(text: str, key: str) -> str:
+    """The emphasis that fits the line: the key, or its strongest 1-2 words."""
+    if _emphasis_ok(text, key):
+        return key
+    parts = [t for t in key.split() if norm_token(t) and norm_token(t) not in FILLER]
+    for size in (2, 1):
+        for k in range(len(parts) - size, -1, -1):
+            candidate = " ".join(parts[k : k + size])
+            if _emphasis_ok(text, candidate):
+                return candidate
+    return ""
+
+
+def assign_styles(
+    drafts: list[CaptionDraft], notes: list[LineNote], words: list[Word]
+) -> list[CaptionDraft]:
+    """Turn line judgements into the reference look with a steady rhythm.
+
+    Placed in priority order so the strongest moments win the spacing: the hook,
+    then hand-drawn accents on weight-3 ideas, then serif payoffs, then cream serif
+    words on meaningful lines. Everything else stays plain white sans.
+    """
+    if not drafts:
+        return []
+    notes = list(notes) + [LineNote()] * max(0, len(drafts) - len(notes))
+    n = len(drafts)
+    texts = [_strip_greeting(d.text) if i <= 1 else d.text for i, d in enumerate(drafts)]
+    times = [words[d.first].start for d in drafts]
+    styles = ["plain"] * n
+    emphasis = [""] * n
+    stacked: dict[int, int] = {}  # hook index -> absorbed next index
+
+    def clear(i: int, style: str) -> bool:
+        gap = STYLE_MIN_GAP.get(style, 0.0)
+        for j in range(n):
+            if j == i or styles[j] == "plain":
+                continue
+            dt = abs(times[i] - times[j])
+            if styles[j] == style and dt < gap:
+                return False
+            designed = {*BIG_STYLES, "underline"}
+            if style in designed and styles[j] in designed and dt < BIG_MIN_GAP + 0.6:
+                return False
+        return True
+
+    # 1. Hook.
+    hook = _hook_index(drafts, words, notes)
+    if 0 <= hook < n:
+        n_words = len(texts[hook].split())
+        if (
+            hook + 1 < n
+            and n_words <= 3
+            and len(texts[hook + 1].split()) <= 4
+            and times[hook + 1] - times[hook] <= 1.8
+            and not texts[hook].rstrip().endswith((".", "?", "!"))
+        ):
+            styles[hook] = "stack"
+            stacked[hook] = hook + 1
+        elif n_words <= MAX_WORDS["serif"]:
+            styles[hook] = "serif"
+        else:
+            key = _key_for(texts[hook], notes[hook].key) or _content_word(texts[hook].split())
+            styles[hook], emphasis[hook] = ("mix", key) if key else ("plain", "")
+
+    def free(i: int) -> bool:
+        return styles[i] == "plain" and i not in stacked.values()
+
+    # 2. Hand-drawn accents on the key ideas.
+    accent_for = {"concept": "oval", "term": "underline", "drama": "tape", "quote": "quote"}
+    order = sorted(range(n), key=lambda i: (-notes[i].weight, times[i]))
+    for i in order:
+        note = notes[i]
+        if not free(i) or note.weight < 2 or note.kind not in accent_for:
+            continue
+        if note.weight == 2 and note.kind not in {"drama", "quote", "term"}:
+            continue
+        n_words = len(texts[i].split())
+        key = _key_for(texts[i], note.key)
+        candidates = [accent_for[note.kind]]
+        if note.kind == "concept":
+            candidates.append("underline")
+        for style in candidates:
+            fits = {
+                "oval": n_words <= MAX_WORDS["oval"],
+                "underline": n_words <= MAX_WORDS["underline"] and bool(key),
+                "tape": n_words <= MAX_WORDS["tape"] and bool(key),
+                "quote": 2 <= n_words <= MAX_WORDS["quote"],
+            }[style]
+            if fits and clear(i, style):
+                styles[i] = style
+                emphasis[i] = key if style == "underline" else ""
+                break
+
+    # 3. Serif payoffs.
+    for i in order:
+        note = notes[i]
+        if not free(i) or note.weight < 2:
+            continue
+        if note.kind == "normal" and note.weight < 3:
+            continue
+        if len(texts[i].split()) <= MAX_WORDS["serif"] and clear(i, "serif"):
+            styles[i] = "serif"
+
+    # 4. Fill to the reel's rhythm: the judged lines are often too few for the
+    #    look, so the strongest free lines take the remaining slots.
+    seconds = max(times[-1] - times[0], 1.0)
+
+    def rank(i: int) -> tuple[int, int, float]:
+        content = [t for t in texts[i].split() if norm_token(t) not in FILLER]
+        return (notes[i].weight, len(content), -times[i])
+
+    for style, target, limit in (
+        ("oval", round(seconds / 26), MAX_WORDS["oval"]),
+        ("underline", round(seconds / 20), MAX_WORDS["underline"]),
+        ("serif", round(seconds / 7), MAX_WORDS["serif"]),
+    ):
+        have = sum(1 for s in styles if s == style)
+        for i in sorted(range(n), key=rank, reverse=True):
+            if have >= target:
+                break
+            if not free(i) or notes[i].weight < 1:
+                continue
+            words_in = texts[i].split()
+            if len(words_in) > limit:
+                continue
+            key = _key_for(texts[i], notes[i].key) or _content_word(words_in)
+            # A hand-drawn accent needs a real word to sit on.
+            if len(norm_token(key)) < (5 if style != "serif" else 4):
+                continue
+            if not clear(i, style):
+                continue
+            styles[i] = style
+            emphasis[i] = key if style == "underline" else ""
+            have += 1
+
+    # 5. Cream serif words.
+    for i in range(n):
+        if not free(i):
+            continue
+        key = _key_for(texts[i], notes[i].key)
+        if not key:
+            continue
+        prev_plain = i == 0 or styles[i - 1] == "plain"
+        if notes[i].weight >= 2 or prev_plain or len(norm_token(key)) >= 7:
+            styles[i], emphasis[i] = "mix", key
+
+    out: list[CaptionDraft] = []
+    absorbed = set(stacked.values())
+    for i, d in enumerate(drafts):
+        if i in absorbed:
+            continue
+        if i in stacked:
+            nxt = drafts[stacked[i]]
+            out.append(replace(d, text=texts[i], sub=nxt.text, last=nxt.last, style="stack", emphasis=""))
+            continue
+        out.append(replace(d, text=texts[i], style=styles[i], emphasis=emphasis[i]))
+    return out
+
+
+def align_phrases(phrases: list[str], asr: list[Word]) -> list[tuple[int, int]]:
+    """Map consecutive caption phrases onto a segment's timed words.
+
+    Returns one local (first, last) word range per phrase. Tokens that match ASR
+    words anchor the mapping; the rest are interpolated by position. Every phrase
+    gets at least one word while words last; extra phrases share the final word.
+    """
+    n_words = len(asr)
+    n_phrases = len(phrases)
+    if n_phrases == 0 or n_words == 0:
+        return [(0, max(0, n_words - 1))] * n_phrases
+    tokens: list[str] = []
+    first_token: list[int] = []
+    for phrase in phrases:
+        first_token.append(len(tokens))
+        tokens.extend(phrase.split() or ["_"])
+    a = [norm_token(t) for t in tokens]
+    b = [norm_token(w.word) for w in asr]
+    anchors: list[tuple[float, float]] = [(-1.0, -0.5)]
+    for block in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(block.size):
+            if a[block.a + k]:
+                anchors.append((float(block.a + k), float(block.b + k)))
+    anchors.append((float(len(tokens)), n_words - 0.5))
+    estimate = [0.0] * len(tokens)
+    for (i0, p0), (i1, p1) in zip(anchors, anchors[1:]):
+        lo, hi = int(i0), int(i1)
+        for i in range(max(lo, 0), min(hi + 1, len(tokens))):
+            span = (i1 - i0) or 1.0
+            estimate[i] = p0 + (p1 - p0) * (i - i0) / span
+    starts: list[int] = []
+    for k in range(n_phrases):
+        s = int(math.floor(estimate[first_token[k]] + 0.5))
+        if k == 0:
+            s = 0
+        else:
+            s = max(s, starts[-1] + 1)
+            s = min(s, n_words - (n_phrases - k)) if n_phrases <= n_words else min(s, n_words - 1)
+            s = max(s, starts[-1] + (1 if n_phrases <= n_words else 0))
+        starts.append(min(max(s, 0), n_words - 1))
+    spans: list[tuple[int, int]] = []
+    for k, s in enumerate(starts):
+        nxt = starts[k + 1] if k + 1 < n_phrases else n_words
+        spans.append((s, max(s, nxt - 1)))
+    return spans
+
+
+def align_token_times(tokens: list[str], asr: list[Word]) -> list[float]:
+    """Start time for each display token, anchored on matching ASR words."""
+    if not tokens:
+        return []
+    if not asr:
+        return [0.0] * len(tokens)
+    t_start = asr[0].start
+    t_end = max(asr[-1].end, t_start + 0.1)
+    a = [norm_token(t) for t in tokens]
+    b = [norm_token(w.word) for w in asr]
+    anchors: dict[int, float] = {}
+    for block in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(block.size):
+            if a[block.a + k]:
+                anchors[block.a + k] = asr[block.b + k].start
+    times: list[float | None] = [anchors.get(i) for i in range(len(tokens))]
+    times[0] = t_start
+    # Interpolate the gaps between anchors.
+    i = 0
+    n = len(times)
+    while i < n:
+        if times[i] is not None:
+            i += 1
+            continue
+        j = i
+        while j < n and times[j] is None:
+            j += 1
+        left = times[i - 1] if i > 0 else t_start
+        right = times[j] if j < n else t_end
+        assert left is not None and right is not None
+        steps = j - i + 1
+        for k in range(i, j):
+            times[k] = left + (right - left) * (k - i + 1) / steps
+        i = j
+    result: list[float] = []
+    prev = t_start
+    for value in times:
+        v = max(float(value if value is not None else prev), prev)
+        result.append(v)
+        prev = v
+    return result
+
+
+def _emphasis_flags(tokens: list[str], emphasis: str) -> list[bool]:
+    flags = [False] * len(tokens)
+    wanted = [norm_token(t) for t in emphasis.split() if norm_token(t)]
+    if not wanted:
+        return flags
+    normed = [norm_token(t) for t in tokens]
+    for i in range(len(normed) - len(wanted) + 1):
+        if normed[i : i + len(wanted)] == wanted:
+            for k in range(len(wanted)):
+                flags[i + k] = True
+            break
+    return flags
+
+
+MIN_ON_SCREEN = 0.72
+REVEAL_WINDOW = 0.45
+# Captions may lead their first spoken word by this much when a flash needs room.
+MAX_LEAD = 0.35
+
+
+def caption_spans(
+    drafts: list[CaptionDraft], words: list[Word], *, video_duration: float
+) -> list[tuple[float, float]]:
+    """On-screen [start, end) per draft: follows the voice, holds through short
+    pauses, and borrows time from neighbours so no caption flashes."""
+    limit = video_duration if video_duration > 0 else (words[-1].end + 1.0 if words else 0.0)
+    starts = [words[d.first].start for d in drafts]
+    ends: list[float] = []
+    for i, d in enumerate(drafts):
+        natural_end = words[d.last].end + 0.28
+        if i + 1 < len(drafts):
+            nxt = starts[i + 1]
+            end = nxt if nxt - natural_end < 0.8 else natural_end + 0.35
+            ends.append(min(end, nxt))
+        else:
+            ends.append(min(words[d.last].end + 0.9, limit))
+    n = len(drafts)
+    for _ in range(3):
+        for i in range(n):
+            need = MIN_ON_SCREEN - (ends[i] - starts[i])
+            if need <= 0:
+                continue
+            # Extend into silence after the caption.
+            ceiling = starts[i + 1] if i + 1 < n else limit
+            grow = min(need, max(0.0, ceiling - ends[i]))
+            ends[i] += grow
+            need -= grow
+            # Borrow from the next caption when it has time to spare.
+            if need > 0 and i + 1 < n and abs(ends[i] - starts[i + 1]) < 1e-6:
+                spare = (ends[i + 1] - starts[i + 1]) - MIN_ON_SCREEN
+                shift = min(need, max(0.0, spare), MAX_LEAD * 1.4)
+                ends[i] += shift
+                starts[i + 1] += shift
+                need -= shift
+            # Or start a little earlier, taking from the previous caption.
+            if need > 0 and i > 0:
+                spare = (ends[i - 1] - starts[i - 1]) - MIN_ON_SCREEN
+                lead = min(need, max(0.0, spare), MAX_LEAD)
+                if abs(ends[i - 1] - starts[i]) < 1e-6:
+                    ends[i - 1] -= lead
+                starts[i] -= lead
+    spans: list[tuple[float, float]] = []
+    prev_end = 0.0
+    for s, e in zip(starts, ends):
+        s = max(s, prev_end)
+        e = min(max(e, s + 0.2), limit) if limit > s else s + 0.2
+        spans.append((s, e))
+        prev_end = e
+    return spans
+
+
+def drafts_to_timeline(
+    drafts: list[CaptionDraft], words: list[Word], *, video_duration: float
+) -> CaptionTimeline:
+    captions: list[Caption] = []
+    spans = caption_spans(drafts, words, video_duration=video_duration)
+    for index, d in enumerate(drafts):
+        asr = words[d.first : d.last + 1]
+        if not asr:
+            continue
+        start, end = spans[index]
+        if end <= start:
+            continue
+
+        line0 = d.tokens
+        line1 = d.sub_tokens if d.style == "stack" else []
+        tokens = line0 + line1
+        times = align_token_times(tokens, asr)
+        # Words build in with the voice, but the full line lands quickly so the
+        # viewer reads phrases, not a word ticker.
+        window = min(REVEAL_WINDOW, 0.5 * (end - start))
+        last_t = max(times[-1] - start, 1e-6) if times else 1e-6
+        if last_t > window:
+            times = [start + (t - start) * window / last_t for t in times]
+        flags = _emphasis_flags(line0, d.emphasis) + [False] * len(line1)
+        reveal_ceiling = max(start, end - 0.18)
+        cap_words: list[CaptionWord] = []
+        for k, tok in enumerate(tokens):
+            w_start = min(max(times[k], start), reveal_ceiling)
+            w_end = min(times[k + 1], end) if k + 1 < len(tokens) else end
+            w_end = max(w_end, w_start + 0.01)
+            if w_end > end:
+                w_start, w_end = min(w_start, end - 0.01), end
+            cap_words.append(
+                CaptionWord(text=tok, start=w_start, end=w_end, emphasis=flags[k])
+            )
+        text = " ".join(line0) + ("\n" + " ".join(line1) if line1 else "")
+        captions.append(
+            Caption(
+                start=start,
+                end=end,
+                text=text,
+                treatment=d.style,  # type: ignore[arg-type]
+                words=cap_words,
+            )
+        )
+    return CaptionTimeline(captions=captions)

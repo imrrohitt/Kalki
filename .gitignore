@@ -11,3 +11,4 @@ output/
 !docs/samples/*.mp4
 !assets/**
 assets/fonts/Apple Color Emoji.ttc
+deepseek_key.txt

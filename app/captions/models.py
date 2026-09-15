@@ -17,6 +17,7 @@ CaptionTreatment = Literal[
     "underline",
     "blob",
     "stack",
+    "tape",
 ]
 
 

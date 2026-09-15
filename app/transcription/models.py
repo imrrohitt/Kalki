@@ -17,6 +17,8 @@ class Segment(BaseModel):
 
 class Transcript(BaseModel):
     language: str | None = None
+    # Language actually spoken (e.g. "hi") when `language` is the decode target.
+    spoken_language: str | None = None
     language_probability: float | None = None
     duration: float | None = None
     segments: list[Segment] = Field(default_factory=list)

@@ -39,6 +39,20 @@ class FasterWhisperProvider:
             logger.info("whisper model ready")
         return self._model
 
+    def _detect_language(self, model: WhisperModel, audio_path: str) -> str | None:
+        try:
+            from faster_whisper.audio import decode_audio
+
+            audio = decode_audio(audio_path, sampling_rate=16000)
+            language, probability, _ = model.detect_language(
+                audio, vad_filter=settings.whisper_vad_enabled
+            )
+            logger.info("whisper detected language=%s p=%.2f", language, probability)
+            return language
+        except Exception as exc:  # noqa: BLE001 - detection is advisory only
+            logger.warning("whisper language detection failed: %s", exc)
+            return None
+
     def _transcribe_sync(self, audio_path: str) -> Transcript:
         model = self._get_model()
         vad_parameters = None
@@ -47,15 +61,25 @@ class FasterWhisperProvider:
                 "min_silence_duration_ms": settings.whisper_min_silence_ms,
             }
 
-        logger.info("whisper transcribe started")
+        spoken = self._detect_language(model, audio_path)
+        # Hindi / Hinglish through the multilingual decoder comes back as broken
+        # Devanagari. Decoding straight to English keeps word timings and gives
+        # the caption director real sentences to work with.
+        output_language = (settings.whisper_output_language or "").strip() or None
+        language = output_language or spoken
+        logger.info(
+            "whisper transcribe started (spoken=%s, output=%s)", spoken, language
+        )
         segments_iter, info = model.transcribe(
             audio_path,
-            language=None,
+            language=language,
             task="transcribe",
             beam_size=settings.whisper_beam_size,
             word_timestamps=True,
             vad_filter=settings.whisper_vad_enabled,
             vad_parameters=vad_parameters,
+            initial_prompt=settings.whisper_initial_prompt or None,
+            condition_on_previous_text=False,
         )
         segments_list = []
         last_log = 0.0
@@ -98,6 +122,7 @@ class FasterWhisperProvider:
 
         return Transcript(
             language=getattr(info, "language", None),
+            spoken_language=spoken,
             language_probability=getattr(info, "language_probability", None),
             duration=float(duration) if duration is not None else None,
             segments=segments,

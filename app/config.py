@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     llm_model: str = "groq/llama-3.3-70b-versatile"
     llm_api_key: str = ""
     llm_base_url: str = ""
+    # Plain-text DeepSeek key. When the file exists it wins over LLM_API_KEY.
+    deepseek_key_file: str = "deepseek_key.txt"
+    deepseek_base_url: str = "https://api.deepseek.com"
+    # Caption director: writes + reviews on-screen copy. Pro reads Hinglish better.
+    director_model: str = "deepseek-v4-pro"
+    director_fast_model: str = "deepseek-flash"
 
     whisper_model: str = "tiny"
     whisper_device: str = "cpu"
@@ -23,6 +29,10 @@ class Settings(BaseSettings):
     whisper_vad_enabled: bool = True
     whisper_min_silence_ms: int = 500
     whisper_beam_size: int = 5
+    # Decode target. "en" turns Hindi/Hinglish speech into timed English words.
+    # Empty = transcribe in the detected spoken language.
+    whisper_output_language: str = "en"
+    whisper_initial_prompt: str = ""
 
     caption_font_path: str = "assets/fonts/Montserrat-Bold.ttf"
     # Max source length in seconds. 0 disables the duration check.
@@ -56,6 +66,29 @@ class Settings(BaseSettings):
     x264_preset: str = "medium"
     x264_crf: int = 16
     audio_bitrate: str = "256k"
+    # Full-frame talking head: rasterize captions at delivery width at least.
+    overlay_min_width: int = 1080
+    caption_director_enabled: bool = True
+    music_enabled: bool = True
+    # Drop licensed tracks here (mood words in the filename help the picker).
+    music_dir: str = "assets/music"
+    # Bed gain before ducking. -32 dB sits the synthesized bed ~18 dB under a normal voice.
+    music_gain_db: float = -32.0
+
+    @property
+    def deepseek_api_key(self) -> str:
+        path = Path(self.deepseek_key_file)
+        if not path.is_absolute():
+            path = ROOT_DIR / path
+        if path.is_file():
+            key = path.read_text(encoding="utf-8").strip()
+            if key:
+                return key
+        return self.llm_api_key.replace("Bearer ", "").strip()
+
+    def resolve_path(self, value: str) -> Path:
+        path = Path(value)
+        return path if path.is_absolute() else ROOT_DIR / path
 
     @property
     def font_path(self) -> Path:

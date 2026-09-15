@@ -28,6 +28,7 @@ _TREATMENTS = {
     "underline",
     "blob",
     "stack",
+    "tape",
 }
 
 

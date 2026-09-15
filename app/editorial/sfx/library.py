@@ -20,6 +20,7 @@ CLIPS: dict[SfxKind, SfxClip] = {
     "swoosh": SfxClip("clean-fast-swooshaiff-14784.mp3", trim=0.48, gain=0.24),
     "impact": SfxClip("arrow-impact-87260.mp3", trim=0.42, gain=0.30),
     "hit": SfxClip("fast-impact-blow-2655.mp3", trim=0.40, gain=0.26),
+    "riser": SfxClip("Lens flare transition sound effect.mp3", trim=0.86, gain=0.16),
 }
 
 

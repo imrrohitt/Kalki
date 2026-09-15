@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import time
+from pathlib import Path
 
 from app.captions.agent import CaptionAgentService
+from app.captions.director import CaptionDirector
+from app.captions.heuristic import heuristic_caption_timeline
 from app.config import settings
 from app.editorial.decisions import EditorialIntelligenceEngine
 from app.editorial.framing import default_visual
@@ -13,6 +16,8 @@ from app.media.audio import extract_audio
 from app.media.probe import probe_audio, probe_video, validate_audio, validate_video
 from app.pipeline.jobs import JobStatus, job_store
 from app.renderer.ffmpeg_renderer import FFmpegRenderer
+from app.renderer.soundtrack import plan_accents
+from app.timeline.models import EditTimeline
 from app.transcription.faster_whisper_provider import FasterWhisperProvider
 from app.transcription.markdown import parse_timestamped_markdown
 from app.transcription.models import Transcript
@@ -24,6 +29,27 @@ def _jid(job_id: str) -> str:
     return job_id[:8]
 
 
+_GENERATED = {"transcript.json", "captions.json", "edit_plan.json", "editorial.json", "brief.json", "job.json", "error.json"}
+
+
+def _uploaded_reference_text(job_dir: Path) -> str:
+    for path in sorted(job_dir.iterdir()):
+        if path.name in _GENERATED or path.suffix.lower() not in {".md", ".txt", ".json"}:
+            continue
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        if path.suffix.lower() != ".json":
+            return raw
+        try:
+            return Transcript.model_validate_json(raw).model_dump_json()
+        except ValueError:
+            return raw
+    path = job_dir / "transcript.json"
+    if path.exists():
+        transcript = Transcript.model_validate_json(path.read_text(encoding="utf-8"))
+        return "\n".join(seg.text for seg in transcript.segments)
+    return ""
+
+
 class Pipeline:
     def __init__(
         self,
@@ -32,12 +58,20 @@ class Pipeline:
         renderer: FFmpegRenderer | None = None,
         editorial: EditorialIntelligenceEngine | None = None,
         transcript_repair: TranscriptRepairAgent | None = None,
+        director: CaptionDirector | None = None,
     ) -> None:
+        self._director = director
         self.stt = stt or FasterWhisperProvider()
         self.caption_agent = caption_agent or CaptionAgentService()
         self.renderer = renderer or FFmpegRenderer()
         self.editorial = editorial or EditorialIntelligenceEngine()
         self.transcript_repair = transcript_repair or TranscriptRepairAgent()
+
+    @property
+    def director(self) -> CaptionDirector:
+        if self._director is None:
+            self._director = CaptionDirector()
+        return self._director
 
     async def run(self, job_id: str) -> None:
         job = job_store.get(job_id)
@@ -81,6 +115,10 @@ class Pipeline:
             t_audio = time.perf_counter()
             extract_audio(job.source_path, str(audio_path))
             logger.info("[%s] audio extracted (%.1fs)", jid, time.perf_counter() - t_audio)
+
+            if self._use_director(job):
+                await self._run_director_reel(job, info, audio_path, t0)
+                return
 
             job.set_stage(JobStatus.transcribing)
             t_stt = time.perf_counter()
@@ -249,6 +287,104 @@ class Pipeline:
             )
             if audio_path.exists():
                 audio_path.unlink(missing_ok=True)
+
+    def _use_director(self, job) -> bool:
+        return (
+            settings.caption_director_enabled
+            and not job.split_layout
+            and not settings.caption_heuristic_only
+        )
+
+    async def _run_director_reel(self, job, info, audio_path, t0: float) -> None:
+        """Full-frame talking head: director captions, premium caption layer, soundtrack."""
+        job_dir = job.job_dir
+        jid = _jid(job.job_id)
+        transcript_path = job_dir / "transcript.json"
+        duration = info.duration
+
+        # Creator-supplied transcript is the reference for meaning; Whisper still
+        # runs because only it knows when each word is spoken.
+        reference_text = _uploaded_reference_text(job_dir) if job.skip_stt else ""
+
+        job.set_stage(JobStatus.transcribing)
+        t_stt = time.perf_counter()
+        logger.info("[%s] transcribing%s", jid, " (upload used as reference)" if reference_text else "")
+        transcript = await self.stt.transcribe(str(audio_path))
+        transcript_path.write_text(transcript.model_dump_json(indent=2), encoding="utf-8")
+        job.transcript_path = str(transcript_path)
+        job.metrics["transcription_time_ms"] = int((time.perf_counter() - t_stt) * 1000)
+        job.metrics["spoken_language"] = transcript.spoken_language
+        logger.info(
+            "[%s] transcript spoken=%s: %s words (%.1fs)",
+            jid,
+            transcript.spoken_language,
+            sum(len(s.words) for s in transcript.segments),
+            time.perf_counter() - t_stt,
+        )
+
+        job.set_stage(JobStatus.generating_captions)
+        t_dir = time.perf_counter()
+        brief_mood = "warm_inspiring"
+        try:
+            result = await self.director.direct(
+                transcript,
+                video_duration=duration,
+                job_id=job.job_id,
+                reference_text=reference_text,
+            )
+            timeline = result.timeline
+            brief_mood = result.brief.music_mood
+            (job_dir / "brief.json").write_text(
+                json.dumps(result.brief.as_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            job.metrics["director"] = result.metrics
+            job.metrics["director_review"] = result.review_notes
+        except Exception as exc:  # noqa: BLE001 - never fail the reel on the LLM
+            logger.warning("[%s] director failed (%s); heuristic captions", jid, exc)
+            timeline = heuristic_caption_timeline(transcript, duration)
+        job.metrics["agent_time_ms"] = int((time.perf_counter() - t_dir) * 1000)
+        captions_path = job_dir / "captions.json"
+        captions_path.write_text(timeline.model_dump_json(indent=2), encoding="utf-8")
+        job.captions_path = str(captions_path)
+        logger.info("[%s] captions: %s lines (%.1fs)", jid, len(timeline.captions), time.perf_counter() - t_dir)
+
+        job.set_stage(JobStatus.planning_edits)
+        accents = plan_accents(timeline, video_duration=duration)
+        edit_plan = EditTimeline(captions=list(timeline.captions), sfx=accents)
+        edit_plan_path = job_dir / "edit_plan.json"
+        edit_plan_path.write_text(
+            json.dumps(
+                {**json.loads(edit_plan.model_dump_json()), "music_mood": brief_mood},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        job.edit_plan_path = str(edit_plan_path)
+        job.metrics["sfx_count"] = len(accents)
+        job.metrics["music_mood"] = brief_mood
+
+        job.set_stage(JobStatus.rendering)
+        t_render = time.perf_counter()
+        output_path = job_dir / "output.mp4"
+        self.renderer.render_overlay_reel(
+            source_video=job.source_path,
+            caption_timeline=timeline,
+            output_path=str(output_path),
+            accents=accents,
+            music_mood=brief_mood,
+            video_duration=duration,
+        )
+        job.metrics["render_time_ms"] = int((time.perf_counter() - t_render) * 1000)
+        logger.info("[%s] render done (%.1fs)", jid, time.perf_counter() - t_render)
+
+        job.result_path = str(output_path)
+        job.metrics["total_processing_time_ms"] = int((time.perf_counter() - t0) * 1000)
+        job.metrics["stt_api_cost"] = 0
+        job.set_stage(JobStatus.completed)
+        logger.info("[%s] completed in %.1fs", jid, time.perf_counter() - t0)
+        if audio_path.exists():
+            audio_path.unlink()
 
     async def run_audio(self, job_id: str) -> None:
         job = job_store.get(job_id)
