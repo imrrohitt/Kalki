@@ -60,14 +60,14 @@ class FFmpegRenderer:
             .replace(" ", "\\ ")
         )
 
-    def _encode_args(self) -> list[str]:
+    def _encode_args(self, *, crf: int | None = None, preset: str | None = None) -> list[str]:
         return [
             "-c:v",
             "libx264",
             "-preset",
-            settings.x264_preset,
+            preset or settings.x264_preset,
             "-crf",
-            str(settings.x264_crf),
+            str(crf if crf is not None else settings.x264_crf),
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -258,9 +258,15 @@ class FFmpegRenderer:
         info = probe_video(source_video)
         duration = video_duration or info.duration
         out_w, out_h = self.overlay_size(source_video)
+        # Keep the source cadence (60 fps phone video stays smooth) and never
+        # resample a frame we do not have to.
+        fps = self.fps
+        if info.fps and info.fps > 0:
+            fps = int(min(round(info.fps), settings.overlay_max_fps))
+        fps = max(fps, 24)
         head_top = detect_head_top(source_video, width=out_w, height=out_h)
         layer = CaptionLayer(
-            caption_timeline, width=out_w, height=out_h, fps=self.fps, head_top=head_top
+            caption_timeline, width=out_w, height=out_h, fps=fps, head_top=head_top
         )
         bright = band_is_bright(
             self._sample_band(
@@ -276,11 +282,11 @@ class FFmpegRenderer:
             caption_timeline,
             width=out_w,
             height=out_h,
-            fps=self.fps,
+            fps=fps,
             head_top=head_top,
             bright_background=bright,
         )
-        n_frames = int(math.ceil(duration * self.fps))
+        n_frames = int(math.ceil(duration * fps))
 
         music_path: Path | None = None
         synthesized: Path | None = None
@@ -293,7 +299,7 @@ class FFmpegRenderer:
         cmd = [
             settings.ffmpeg_path, "-y", "-i", source_video,
             "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", f"{out_w}x{layer.band_height}", "-framerate", str(self.fps),
+            "-s", f"{out_w}x{layer.band_height}", "-framerate", str(fps),
             "-i", "pipe:0",
         ]
         audio_graph = ""
@@ -308,8 +314,16 @@ class FFmpegRenderer:
             )
             for path in files:
                 cmd.extend(["-i", str(path)])
+        # Only resample when the source is smaller than delivery width; a mild
+        # unsharp restores the edge the lanczos upscale softens.
+        upscaled = out_w != info.display_width or out_h != info.display_height
+        resize = (
+            f"scale={out_w}:{out_h}:flags=lanczos,unsharp=5:5:0.5:5:5:0.0,"
+            if upscaled
+            else ""
+        )
         video_graph = (
-            f"[0:v]scale={out_w}:{out_h}:flags=lanczos,fps={self.fps},setsar=1,format=yuv420p[base];"
+            f"[0:v]{resize}fps={fps},setsar=1,format=yuv420p[base];"
             "[1:v]format=yuva420p[cap];"
             f"[base][cap]overlay=0:{layer.band_top}:eof_action=pass:format=yuv420,format=yuv420p[vout]"
         )
@@ -317,14 +331,22 @@ class FFmpegRenderer:
         cmd.extend(["-filter_complex", graph, "-map", "[vout]"])
         cmd.extend(["-map", "[aout]"] if audio_graph else [])
         cmd.extend(["-t", f"{duration:.3f}"])
-        cmd.extend(self._encode_args())
-        cmd.append(output_path)
+        cmd.extend(
+            self._encode_args(crf=settings.overlay_crf, preset=settings.overlay_preset)
+        )
+        # Encode beside the deliverable and move it in place, so a half-written or
+        # abandoned encode can never masquerade as the finished reel.
+        staging = out.with_name(f"{out.stem}.part{out.suffix}")
+        staging.unlink(missing_ok=True)
+        cmd.append(str(staging))
 
         logger.info(
-            "ffmpeg overlay-reel %sx%s band=%s@%s bright=%s captions=%s accents=%s music=%s",
-            out_w, out_h, layer.band_height, layer.band_top, bright,
+            "ffmpeg overlay-reel %sx%s@%sfps band=%s@%s upscaled=%s bright=%s "
+            "captions=%s accents=%s music=%s crf=%s preset=%s",
+            out_w, out_h, fps, layer.band_height, layer.band_top, upscaled, bright,
             len(caption_timeline.captions), len(accents or []),
             music_path.name if music_path else None,
+            settings.overlay_crf, settings.overlay_preset,
         )
         with tempfile.TemporaryFile() as err:
             try:
@@ -346,7 +368,9 @@ class FFmpegRenderer:
             if code != 0:
                 err.seek(0)
                 tail = err.read().decode("utf-8", "replace")[-1500:]
+                staging.unlink(missing_ok=True)
                 raise MediaError(f"render failed: {tail}")
+        staging.replace(out)
         if synthesized is not None:
             synthesized.unlink(missing_ok=True)
         return output_path

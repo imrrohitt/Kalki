@@ -54,6 +54,8 @@ ACRONYMS = {
     "AI", "RAG", "LLM", "LLMS", "API", "APIS", "GPU", "CPU", "SQL", "UI", "UX", "ML",
     "CEO", "CTO", "IT", "AWS", "GCP", "GDPR", "PEFT", "LORA", "NLP", "SDK", "OK",
     "HR", "DSA", "SDE", "CV", "PR", "US", "USA", "UK", "PDF", "JSON", "HTTP",
+    "SEO", "SEM", "CRM", "ROI", "KPI", "B2B", "B2C", "UPI", "DM", "DMS", "CTA",
+    "SaaS", "MVP", "QA", "OS", "PC", "TV", "FAQ", "URL", "RAM", "SSD",
 }
 FILLER = {
     "a", "an", "the", "is", "am", "are", "was", "were", "be", "to", "of", "in", "on",
@@ -544,6 +546,17 @@ def assign_styles(
         if notes[i].weight >= 2 or prev_plain or len(norm_token(key)) >= 7:
             styles[i], emphasis[i] = "mix", key
 
+    # 6. Cream words carry the reel, but past ~45% of lines they stop reading as
+    #    emphasis. Drop the weakest back to plain white sans.
+    mixes = [i for i in range(n) if styles[i] == "mix"]
+    budget = int(0.45 * n)
+    if len(mixes) > budget:
+        weakest = sorted(
+            mixes, key=lambda i: (notes[i].weight, len(norm_token(emphasis[i])))
+        )
+        for i in weakest[: len(mixes) - budget]:
+            styles[i], emphasis[i] = "plain", ""
+
     out: list[CaptionDraft] = []
     absorbed = set(stacked.values())
     for i, d in enumerate(drafts):
@@ -684,30 +697,42 @@ def caption_spans(
         else:
             ends.append(min(words[d.last].end + 0.9, limit))
     n = len(drafts)
-    for _ in range(3):
+    # Water-fill the minimum on-screen time. Each pass pushes a boundary later
+    # (or earlier) by what the neighbour can spare; repeating it lets the need
+    # travel along a run of rushed captions to wherever the slack actually is.
+    for _ in range(12):
+        moved = False
         for i in range(n):
             need = MIN_ON_SCREEN - (ends[i] - starts[i])
-            if need <= 0:
+            if need <= 1e-4:
                 continue
             # Extend into silence after the caption.
             ceiling = starts[i + 1] if i + 1 < n else limit
             grow = min(need, max(0.0, ceiling - ends[i]))
-            ends[i] += grow
-            need -= grow
-            # Borrow from the next caption when it has time to spare.
-            if need > 0 and i + 1 < n and abs(ends[i] - starts[i + 1]) < 1e-6:
-                spare = (ends[i + 1] - starts[i + 1]) - MIN_ON_SCREEN
-                shift = min(need, max(0.0, spare), MAX_LEAD * 1.4)
-                ends[i] += shift
-                starts[i + 1] += shift
-                need -= shift
-            # Or start a little earlier, taking from the previous caption.
-            if need > 0 and i > 0:
-                spare = (ends[i - 1] - starts[i - 1]) - MIN_ON_SCREEN
-                lead = min(need, max(0.0, spare), MAX_LEAD)
-                if abs(ends[i - 1] - starts[i]) < 1e-6:
-                    ends[i - 1] -= lead
-                starts[i] -= lead
+            if grow > 0:
+                ends[i] += grow
+                need -= grow
+                moved = True
+            # Push the next boundary later; the next caption may pass the need on.
+            if need > 1e-4 and i + 1 < n and abs(ends[i] - starts[i + 1]) < 1e-6:
+                room = (ends[i + 1] - starts[i + 1]) - 0.4 * MIN_ON_SCREEN
+                shift = min(need, max(0.0, room))
+                if shift > 0:
+                    ends[i] += shift
+                    starts[i + 1] += shift
+                    need -= shift
+                    moved = True
+            # Or start earlier, taking from the previous caption.
+            if need > 1e-4 and i > 0:
+                room = (ends[i - 1] - starts[i - 1]) - 0.4 * MIN_ON_SCREEN
+                lead = min(need, max(0.0, room), MAX_LEAD)
+                if lead > 0:
+                    if abs(ends[i - 1] - starts[i]) < 1e-6:
+                        ends[i - 1] -= lead
+                    starts[i] -= lead
+                    moved = True
+        if not moved:
+            break
     spans: list[tuple[float, float]] = []
     prev_end = 0.0
     for s, e in zip(starts, ends):

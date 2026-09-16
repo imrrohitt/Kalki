@@ -81,6 +81,9 @@ async def main() -> None:
         (out_dir / "captions.json").write_text(
             result.timeline.model_dump_json(indent=2), encoding="utf-8"
         )
+        (out_dir / "design.json").write_text(
+            json.dumps(result.design(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         log.info("director: %s captions %s", len(result.timeline.captions), result.metrics)
         accents = plan_accents(result.timeline, video_duration=info.duration)
         t_render = time.perf_counter()

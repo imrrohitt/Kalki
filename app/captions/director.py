@@ -187,8 +187,24 @@ class DirectorResult:
     timeline: CaptionTimeline
     brief: ReelBrief
     drafts: list[CaptionDraft]
+    notes: list["LineNote"] = field(default_factory=list)
     review_notes: str = ""
     metrics: dict[str, Any] = field(default_factory=dict)
+
+    def design(self) -> list[dict[str, Any]]:
+        """Per line: what it says, what it means, and how it is drawn."""
+        return [
+            {
+                "text": d.text,
+                "sub": d.sub,
+                "style": d.style,
+                "emphasis": d.emphasis,
+                "key": note.key,
+                "weight": note.weight,
+                "kind": note.kind,
+            }
+            for d, note in zip(self.drafts, list(self.notes) + [LineNote()] * len(self.drafts))
+        ]
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -636,5 +652,10 @@ class CaptionDirector:
         drafts = enforce_design_rules(drafts, words)
         timeline = drafts_to_timeline(drafts, words, video_duration=video_duration)
         return DirectorResult(
-            timeline=timeline, brief=brief, drafts=drafts, review_notes=notes, metrics=metrics
+            timeline=timeline,
+            brief=brief,
+            drafts=drafts,
+            notes=line_notes,
+            review_notes=notes,
+            metrics=metrics,
         )

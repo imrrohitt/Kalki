@@ -67,7 +67,13 @@ class Settings(BaseSettings):
     x264_crf: int = 16
     audio_bitrate: str = "256k"
     # Full-frame talking head: rasterize captions at delivery width at least.
+    # Sources wider than this keep their own resolution.
     overlay_min_width: int = 1080
+    # Delivery master for full-frame reels: source resolution and fps are kept,
+    # and CRF 17 is visually transparent well above what Instagram re-encodes to.
+    overlay_crf: int = 17
+    overlay_preset: str = "fast"
+    overlay_max_fps: int = 60
     caption_director_enabled: bool = True
     music_enabled: bool = True
     # Drop licensed tracks here (mood words in the filename help the picker).

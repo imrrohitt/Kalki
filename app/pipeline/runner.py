@@ -338,6 +338,9 @@ class Pipeline:
                 json.dumps(result.brief.as_dict(), indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
+            (job_dir / "design.json").write_text(
+                json.dumps(result.design(), indent=2, ensure_ascii=False), encoding="utf-8"
+            )
             job.metrics["director"] = result.metrics
             job.metrics["director_review"] = result.review_notes
         except Exception as exc:  # noqa: BLE001 - never fail the reel on the LLM
