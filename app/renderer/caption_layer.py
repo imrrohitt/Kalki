@@ -39,6 +39,11 @@ CREAM = (255, 246, 194)
 TAPE_FILL = (176, 196, 170)
 TAPE_INK = (38, 26, 19)
 HAIRLINE = (240, 238, 232)
+# Premium colored pill for a line naming a concrete figure (money, %, a round
+# number) — alternated so a two-chip video doesn't repeat the same color.
+CHIP_COLORS = [(22, 34, 49), (140, 72, 40)]  # deep ink-navy, warm terracotta
+CHIP_TEXT = (255, 250, 236)
+CHIP_SPARK = (255, 250, 232)
 
 # Font sizes in px on a 1080-wide frame.
 FS_SANS = 58
@@ -48,6 +53,7 @@ FS_SERIF = 90
 FS_HOOK = 104
 FS_SUB = 56
 FS_TAPE = 94
+FS_CHIP = 64
 MAX_LINE_FRAC = 0.84
 
 WORD_IN = 0.16
@@ -371,6 +377,8 @@ class CaptionLayer:
                 text = word.text
                 if treatment == "tape":
                     tok = _Token(word, text, SERIF_FONT, FS_TAPE, TAPE_INK, shadow=False)
+                elif treatment == "chip":
+                    tok = _Token(word, text, SANS_FONT, FS_CHIP, CHIP_TEXT, shadow=False)
                 elif treatment == "stack":
                     if li == 0:
                         tok = _Token(word, text, SERIF_FONT, FS_HOOK, CREAM)
@@ -423,7 +431,7 @@ class CaptionLayer:
             treatment = "tape"
         lines = self._tokens(cap, index)
         max_w = self.width * MAX_LINE_FRAC
-        if treatment == "tape":
+        if treatment in {"tape", "chip"}:
             max_w -= 2 * 64 * u
         elements: list[Element] = []
         baseline = float(self.baseline)
@@ -442,12 +450,12 @@ class CaptionLayer:
                 baseline += 1.10 * size + 0.55 * prev_size
             prev_size = size
             x_left = (self.width - width) / 2.0
-            whole_line = treatment in SERIF_LINE_STYLES or treatment == "tape" or (
+            whole_line = treatment in SERIF_LINE_STYLES or treatment in {"tape", "chip"} or (
                 treatment == "stack" and li == 0
             )
             for k, (tok, sp, dx) in enumerate(zip(tokens, sprites, xs)):
                 if whole_line:
-                    t_in = cap.start + 0.05 * k + (0.14 if treatment == "tape" else 0.0)
+                    t_in = cap.start + 0.05 * k + (0.14 if treatment in {"tape", "chip"} else 0.0)
                     dur, rise = LINE_IN, 16 * u
                 else:
                     t_in = max(cap.start, tok.word.start)
@@ -479,6 +487,8 @@ class CaptionLayer:
             elements.extend(self._underline(cap, line_meta[-1], lines[-1]))
         elif treatment == "tape":
             elements[:0] = self._tape(cap, first, index)
+        elif treatment == "chip":
+            elements[:0] = self._chip(cap, first, index)
         return elements
 
     # ---------------------------------------------------------- decorations
@@ -581,6 +591,56 @@ class CaptionLayer:
                 frames=pops, x=int(cx), y=int(y),
             ),
         ]
+
+    def _chip(self, cap: Caption, meta, index: int) -> list[Element]:
+        """Solid rounded pill behind a concrete-figure line, plus a small
+        sparkle at its corner — a premium highlight, not a torn sticker."""
+        u = self.u
+        x0, x1, top, bottom, size = meta
+        pad_x = int(38 * u)
+        pad_y = int(22 * u)
+        w = int((x1 - x0) + 2 * pad_x)
+        h = int((bottom - top) + 2 * pad_y)
+        cx = (x0 + x1) / 2
+        cy = (top + bottom) / 2
+        radius = int(h * 0.40)
+        ss = 3
+        pad = int(16 * u)
+        W = w + 2 * pad
+        H = h + 2 * pad
+        mask = Image.new("L", (W * ss, H * ss), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [pad * ss, pad * ss, (W - pad) * ss, (H - pad) * ss],
+            radius=radius * ss,
+            fill=255,
+        )
+        small = mask.resize((W, H), Image.LANCZOS)
+        m = np.asarray(small, np.float32) / 255.0
+        shade = np.asarray(small.filter(ImageFilter.GaussianBlur(11 * u)), np.float32) / 255.0
+        shade = np.roll(shade, max(1, int(6 * u)), axis=0)
+        color = CHIP_COLORS[index % len(CHIP_COLORS)]
+        arr = np.zeros((H, W, 4), np.float32)
+        col = np.array(color, np.float32) / 255.0
+        arr[..., :3] = col[None, None, :] * m[..., None]
+        arr[..., 3] = m + (shade * 0.32 * self.shadow) * (1.0 - m)
+
+        els = [
+            self._element(
+                t_in=cap.start, dur=0.22, t_out=cap.end, mode="wipe",
+                arr=arr, x=int(cx - W / 2), y=int(cy - H / 2),
+            )
+        ]
+        spark = _astroid(max(7, int(16 * u)), CHIP_SPARK)
+        pops = [_scaled(spark, s) for s in (0.2, 0.55, 0.9, 1.15, 1.0)]
+        sx = cx + w / 2 - pad_x * 0.30
+        sy = cy - h / 2 + pad_y * 0.30
+        els.append(
+            self._element(
+                t_in=cap.start + 0.16, dur=0.24, t_out=cap.end, mode="frames",
+                frames=pops, x=int(sx), y=int(sy),
+            )
+        )
+        return els
 
     def _tape(self, cap: Caption, meta, index: int) -> list[Element]:
         u = self.u

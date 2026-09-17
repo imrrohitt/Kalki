@@ -29,6 +29,7 @@ _TREATMENTS = {
     "blob",
     "stack",
     "tape",
+    "chip",
 }
 
 

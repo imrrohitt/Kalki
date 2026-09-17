@@ -17,7 +17,7 @@ from app.asr import stabilize_copy
 from app.captions.models import Caption, CaptionTimeline, CaptionWord
 from app.transcription.models import Word
 
-STYLE_NAMES = ("plain", "mix", "serif", "stack", "quote", "oval", "underline", "tape")
+STYLE_NAMES = ("plain", "mix", "serif", "stack", "quote", "oval", "underline", "tape", "chip")
 MUSIC_MOODS = (
     "warm_inspiring",
     "focused_tech",
@@ -34,9 +34,10 @@ STYLE_MIN_GAP = {
     "quote": 12.0,
     "stack": 25.0,
     "serif": 4.5,
+    "chip": 16.0,
 }
 # Big cream moments never sit back to back.
-BIG_STYLES = {"serif", "quote", "oval", "tape", "stack"}
+BIG_STYLES = {"serif", "quote", "oval", "tape", "stack", "chip"}
 BIG_MIN_GAP = 2.4
 MAX_WORDS = {
     "plain": 5,
@@ -47,8 +48,17 @@ MAX_WORDS = {
     "oval": 3,
     "underline": 4,
     "tape": 3,
+    "chip": 4,
 }
 MAX_CAPTION_SECONDS = 3.4
+
+# A line naming a concrete figure (money, percent, a round number) gets the
+# premium colored pill instead of plain white sans — it is the number a
+# scroller remembers.
+MONEY_RE = re.compile(
+    r"(\$|₹|€|£)\s?\d|\d[\d,]*\s?(lakh|crore|million|billion|percent|%)\b",
+    re.I,
+)
 
 ACRONYMS = {
     "AI", "RAG", "LLM", "LLMS", "API", "APIS", "GPU", "CPU", "SQL", "UI", "UX", "ML",
@@ -162,7 +172,7 @@ def _downgrade(d: CaptionDraft) -> CaptionDraft:
     if d.style == "oval":
         style = "serif" if len(d.tokens) <= MAX_WORDS["serif"] else "mix"
         return replace(d, style=style)
-    if d.style in {"tape", "quote"}:
+    if d.style in {"tape", "quote", "chip"}:
         return replace(d, style="serif")
     if d.style == "stack":
         merged = f"{d.text} {d.sub}".strip()
@@ -478,7 +488,15 @@ def assign_styles(
     def free(i: int) -> bool:
         return styles[i] == "plain" and i not in stacked.values()
 
-    # 2. Hand-drawn accents on the key ideas.
+    # 2. Premium colored chip on the line naming a concrete figure — money,
+    #    a percentage, a round number. A scroller remembers the number.
+    for i in range(n):
+        if not free(i) or not MONEY_RE.search(texts[i]):
+            continue
+        if len(texts[i].split()) <= MAX_WORDS["chip"] and clear(i, "chip"):
+            styles[i] = "chip"
+
+    # 3. Hand-drawn accents on the key ideas.
     accent_for = {"concept": "oval", "term": "underline", "drama": "tape", "quote": "quote"}
     order = sorted(range(n), key=lambda i: (-notes[i].weight, times[i]))
     for i in order:
@@ -504,7 +522,7 @@ def assign_styles(
                 emphasis[i] = key if style == "underline" else ""
                 break
 
-    # 3. Serif payoffs.
+    # 4. Serif payoffs.
     for i in order:
         note = notes[i]
         if not free(i) or note.weight < 2:
@@ -514,7 +532,7 @@ def assign_styles(
         if len(texts[i].split()) <= MAX_WORDS["serif"] and clear(i, "serif"):
             styles[i] = "serif"
 
-    # 4. Fill to the reel's rhythm: the judged lines are often too few for the
+    # 5. Fill to the reel's rhythm: the judged lines are often too few for the
     #    look, so the strongest free lines take the remaining slots.
     seconds = max(times[-1] - times[0], 1.0)
 
@@ -546,7 +564,7 @@ def assign_styles(
             emphasis[i] = key if style == "underline" else ""
             have += 1
 
-    # 5. Cream serif words.
+    # 6. Cream serif words.
     for i in range(n):
         if not free(i):
             continue
@@ -557,7 +575,7 @@ def assign_styles(
         if notes[i].weight >= 2 or prev_plain or len(norm_token(key)) >= 7:
             styles[i], emphasis[i] = "mix", key
 
-    # 6. Cream words carry the reel, but past ~45% of lines they stop reading as
+    # 7. Cream words carry the reel, but past ~45% of lines they stop reading as
     #    emphasis. Drop the weakest back to plain white sans.
     mixes = [i for i in range(n) if styles[i] == "mix"]
     budget = int(0.45 * n)

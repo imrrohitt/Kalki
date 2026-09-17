@@ -18,6 +18,7 @@ CaptionTreatment = Literal[
     "blob",
     "stack",
     "tape",
+    "chip",
 ]
 
 
