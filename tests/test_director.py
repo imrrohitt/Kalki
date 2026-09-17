@@ -174,8 +174,8 @@ def test_director_runs_brief_script_review_annotate():
                 "art director",
                 {
                     "lines": [
-                        {"i": 0, "key": "switched", "weight": 2, "kind": "payoff"},
-                        {"i": 1, "key": "AI", "weight": 1, "kind": "term"},
+                        {"i": 0, "key": "switched", "weight": 3, "kind": "payoff", "mood": "excited", "icon": "none"},
+                        {"i": 1, "key": "AI", "weight": 2, "kind": "term", "mood": "neutral", "icon": "growth"},
                     ]
                 },
             ),
@@ -187,6 +187,9 @@ def test_director_runs_brief_script_review_annotate():
     )
     caps = result.timeline.captions
     assert result.brief.music_mood == "focused_tech"
+    # The LLM's mood/icon judgement made it all the way to the rendered caption.
+    assert caps[0].mood == "excited"
+    assert caps[1].icon == "growth"
     assert [c.text for c in caps] == ["I recently switched", "to senior AI engineer role"]
     assert caps[0].treatment in {"serif", "stack"}
     assert caps[-1].end <= 4.0

@@ -59,6 +59,10 @@ MAX_LINE_FRAC = 0.84
 WORD_IN = 0.16
 LINE_IN = 0.30
 EXIT = 0.08
+# A "blink" pop for a line the director judged as a real surprise or an
+# excited beat: a quick overshoot-and-settle instead of the usual smooth rise.
+POP_SCALES = (0.4, 0.75, 1.28, 0.92, 1.08, 1.0)
+POP_DUR = 0.24
 
 SERIF_LINE_STYLES = {"serif", "oval", "quote"}
 DECORATED = {"oval", "underline", "tape", "blob"}
@@ -173,6 +177,18 @@ def _astroid(size: int, color: tuple[int, int, int], *, glow: bool = True) -> np
     out[..., :3] = col * alpha[..., None]
     out[..., 3] = alpha
     return out
+
+
+def _trim_alpha(arr: np.ndarray, pad: int = 2) -> np.ndarray:
+    """Crop to the ink's own bounding box — text_sprite pads generously for a
+    shadow blur radius even when shadow is off, which would otherwise make a
+    tiny glyph (like a currency sign) look empty inside a small icon badge."""
+    ys, xs = np.nonzero(arr[..., 3] > 0.01)
+    if len(ys) == 0:
+        return arr
+    y0, y1 = max(0, ys.min() - pad), min(arr.shape[0], ys.max() + 1 + pad)
+    x0, x1 = max(0, xs.min() - pad), min(arr.shape[1], xs.max() + 1 + pad)
+    return arr[y0:y1, x0:x1]
 
 
 def _scaled(arr: np.ndarray, scale: float) -> np.ndarray:
@@ -453,6 +469,11 @@ class CaptionLayer:
             whole_line = treatment in SERIF_LINE_STYLES or treatment in {"tape", "chip"} or (
                 treatment == "stack" and li == 0
             )
+            # A pop applies to the whole phrase when it reveals as one unit
+            # (serif/oval/tape/chip), or only to its emphasized cream word
+            # inside an ordinary sentence — the rest of the line still just
+            # rises, so the "blink" reads as a highlight, not a glitch.
+            pop_line = cap.mood in {"surprise", "excited"}
             for k, (tok, sp, dx) in enumerate(zip(tokens, sprites, xs)):
                 if whole_line:
                     t_in = cap.start + 0.05 * k + (0.14 if treatment in {"tape", "chip"} else 0.0)
@@ -462,18 +483,33 @@ class CaptionLayer:
                     serif = tok.font_path == SERIF_FONT
                     dur, rise = (0.22, 14 * u) if serif else (WORD_IN, 11 * u)
                 t_in = min(t_in, max(cap.start, cap.end - 0.2))
-                elements.append(
-                    self._element(
-                        t_in=t_in,
-                        dur=dur,
-                        t_out=cap.end,
-                        mode="rise",
-                        arr=sp.arr,
-                        x=int(round(x_left + dx - sp.ox)),
-                        y=int(round(baseline - sp.oy)),
-                        rise=rise,
+                if pop_line and (whole_line or tok.word.emphasis):
+                    cx = x_left + dx - sp.ox + sp.arr.shape[1] / 2
+                    cy = baseline - sp.oy + sp.arr.shape[0] / 2
+                    elements.append(
+                        self._element(
+                            t_in=t_in,
+                            dur=POP_DUR,
+                            t_out=cap.end,
+                            mode="frames",
+                            frames=[_scaled(sp.arr, s) for s in POP_SCALES],
+                            x=int(round(cx)),
+                            y=int(round(cy)),
+                        )
                     )
-                )
+                else:
+                    elements.append(
+                        self._element(
+                            t_in=t_in,
+                            dur=dur,
+                            t_out=cap.end,
+                            mode="rise",
+                            arr=sp.arr,
+                            x=int(round(x_left + dx - sp.ox)),
+                            y=int(round(baseline - sp.oy)),
+                            rise=rise,
+                        )
+                    )
             ink_top = baseline + min(sp.ink_top for sp in sprites)
             ink_bottom = baseline + max(sp.ink_bottom for sp in sprites)
             line_meta.append((x_left, x_left + width, ink_top, ink_bottom, size))
@@ -489,6 +525,8 @@ class CaptionLayer:
             elements[:0] = self._tape(cap, first, index)
         elif treatment == "chip":
             elements[:0] = self._chip(cap, first, index)
+        if cap.icon and cap.icon != "none":
+            elements[:0] = self._icon_badge(cap, first, cap.icon)
         return elements
 
     # ---------------------------------------------------------- decorations
@@ -590,6 +628,92 @@ class CaptionLayer:
                 t_in=t0 + 0.22, dur=0.28, t_out=cap.end, mode="frames",
                 frames=pops, x=int(cx), y=int(y),
             ),
+        ]
+
+    def _icon_glyph(self, icon: str, size: int, u: float) -> np.ndarray | None:
+        """A small premultiplied-RGBA glyph: a currency/@ character for the
+        text-based icons, a hand-drawn shape for the rest."""
+        color = CHIP_SPARK
+        if icon in {"money", "social"}:
+            char = "@" if icon == "social" else "₹"
+            sprite = text_sprite(char, _font(SANS_FONT, max(10, int(size * 1.4))), color, u=u, shadow=0.0)
+            return _trim_alpha(sprite.arr)
+        if icon == "idea":
+            return _astroid(max(6, size // 2), color, glow=False)
+        ss = 4
+        D = max(8, size)
+        img = Image.new("L", (D * ss, D * ss), 0)
+        d = ImageDraw.Draw(img)
+        cx, cy = D * ss / 2, D * ss / 2
+        if icon == "growth":
+            w, h = D * ss * 0.5, D * ss * 0.5
+            d.polygon(
+                [
+                    (cx, cy - h * 0.55), (cx - w * 0.42, cy - h * 0.02), (cx - w * 0.16, cy - h * 0.02),
+                    (cx - w * 0.16, cy + h * 0.55), (cx + w * 0.16, cy + h * 0.55),
+                    (cx + w * 0.16, cy - h * 0.02), (cx + w * 0.42, cy - h * 0.02),
+                ],
+                fill=255,
+            )
+        elif icon == "video":
+            r = D * ss * 0.34
+            d.polygon([(cx - r * 0.55, cy - r), (cx - r * 0.55, cy + r), (cx + r * 1.05, cy)], fill=255)
+        elif icon == "check":
+            pts = [(D * ss * 0.22, D * ss * 0.52), (D * ss * 0.42, D * ss * 0.74), (D * ss * 0.80, D * ss * 0.26)]
+            d.line(pts, fill=255, width=max(2, int(D * ss * 0.13)), joint="curve")
+        else:
+            return None
+        small = img.resize((D, D), Image.LANCZOS)
+        m = np.asarray(small, np.float32) / 255.0
+        out = np.zeros((D, D, 4), np.float32)
+        col = np.array(color, np.float32) / 255.0
+        out[..., :3] = col[None, None, :] * m[..., None]
+        out[..., 3] = m
+        return out
+
+    def _icon_badge(self, cap: Caption, meta, icon: str) -> list[Element]:
+        """A small round badge beside the line — sitting to its left, level
+        with the text, so it never needs headroom the caption band doesn't
+        have. A contextual accent the director chose, not decoration on
+        every line."""
+        u = self.u
+        x0, x1, top, bottom, size = meta
+        diameter = max(44, int(size * 0.80))
+        gap = int(16 * u)
+        cx = x0 - gap - diameter / 2
+        cy = (top + bottom) / 2
+
+        ss = 4
+        pad = int(10 * u)
+        D = diameter + 2 * pad
+        mask = Image.new("L", (D * ss, D * ss), 0)
+        ImageDraw.Draw(mask).ellipse([pad * ss, pad * ss, (D - pad) * ss, (D - pad) * ss], fill=255)
+        small = mask.resize((D, D), Image.LANCZOS)
+        m = np.asarray(small, np.float32) / 255.0
+        shade = np.asarray(small.filter(ImageFilter.GaussianBlur(8 * u)), np.float32) / 255.0
+        shade = np.roll(shade, max(1, int(5 * u)), axis=0)
+        color = CHIP_COLORS[0]
+        arr = np.zeros((D, D, 4), np.float32)
+        col = np.array(color, np.float32) / 255.0
+        arr[..., :3] = col[None, None, :] * m[..., None]
+        arr[..., 3] = m + (shade * 0.30 * self.shadow) * (1.0 - m)
+
+        glyph = self._icon_glyph(icon, int(diameter * 0.5), u)
+        if glyph is not None:
+            gh, gw = glyph.shape[:2]
+            if gw <= D and gh <= D:
+                gx, gy = (D - gw) // 2, (D - gh) // 2
+                region = arr[gy : gy + gh, gx : gx + gw]
+                ga = glyph[..., 3:4]
+                region[..., :3] = glyph[..., :3] + region[..., :3] * (1.0 - ga)
+                region[..., 3:4] = glyph[..., 3:4] + region[..., 3:4] * (1.0 - ga)
+
+        frames = [_scaled(arr, s) for s in POP_SCALES]
+        return [
+            self._element(
+                t_in=cap.start + 0.04, dur=POP_DUR, t_out=cap.end, mode="frames",
+                frames=frames, x=int(cx), y=int(cy),
+            )
         ]
 
     def _chip(self, cap: Caption, meta, index: int) -> list[Element]:

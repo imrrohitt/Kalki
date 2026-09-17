@@ -20,6 +20,12 @@ CaptionTreatment = Literal[
     "tape",
     "chip",
 ]
+# AI-judged context, not a look. Mood drives the reveal motion (a real
+# surprise or an excited beat "blinks" in instead of the usual smooth rise);
+# icon is a small contextual badge. Both default to the quiet case — most
+# lines carry neither.
+CaptionMood = Literal["neutral", "surprise", "excited", "happy", "serious", "urgent"]
+CaptionIcon = Literal["none", "money", "growth", "idea", "video", "social", "check"]
 
 
 class CaptionWord(BaseModel):
@@ -52,6 +58,8 @@ class Caption(BaseModel):
     position: CaptionPosition = "bottom_center"
     animation: CaptionAnimation = "pop"
     treatment: CaptionTreatment = "plain"
+    mood: CaptionMood = "neutral"
+    icon: CaptionIcon = "none"
     words: list[CaptionWord] = Field(default_factory=list)
 
     @field_validator("text")

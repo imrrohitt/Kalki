@@ -8,7 +8,7 @@ from app.renderer.caption_layer import CaptionLayer
 from app.renderer.soundtrack import build_soundtrack, plan_accents, synthesize_music_bed
 
 
-def _cap(start, end, text, treatment, emphasis=()):
+def _cap(start, end, text, treatment, emphasis=(), mood="neutral", icon="none"):
     tokens = text.replace("\n", " ").split()
     step = (end - start) / (len(tokens) + 1)
     return Caption(
@@ -16,6 +16,8 @@ def _cap(start, end, text, treatment, emphasis=()):
         end=end,
         text=text,
         treatment=treatment,
+        mood=mood,
+        icon=icon,
         words=[
             CaptionWord(text=t, start=start + i * step, end=start + (i + 1) * step, emphasis=t in emphasis)
             for i, t in enumerate(tokens)
@@ -68,6 +70,58 @@ def test_accents_are_sparse_and_never_per_word():
     hits = plan_accents(timeline, video_duration=70.0)
     assert hits[0].kind == "riser" and hits[0].at == 0.0
     assert len(hits) == 2  # hook + one sparkle; the underline is too close to the oval
+
+
+def test_pop_mood_uses_frames_reveal_not_rise():
+    """A surprise/excited caption 'blinks' in (scale-bounce) instead of rising."""
+    plain = CaptionTimeline(captions=[_cap(0.0, 1.5, "an ordinary line", "plain")])
+    excited = CaptionTimeline(
+        captions=[_cap(0.0, 1.5, "you won't believe", "serif", mood="excited")]
+    )
+    modes_plain = {e.mode for e, _, _ in CaptionLayer(plain, width=1080, height=1920, head_top=640)._states(0.3, 0)}
+    modes_pop = {e.mode for e, _, _ in CaptionLayer(excited, width=1080, height=1920, head_top=640)._states(0.3, 0)}
+    assert modes_plain == {"rise"}
+    assert "frames" in modes_pop and "rise" not in modes_pop
+
+
+def test_pop_only_touches_emphasis_word_in_an_ordinary_line():
+    timeline = CaptionTimeline(
+        captions=[_cap(0.0, 2.0, "we got surprising results", "mix", ("surprising",), mood="surprise")]
+    )
+    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640)
+    els = layer._layout(timeline.captions[0], 0)
+    # Exactly one word (the emphasized one) pops; the rest still rise.
+    assert sum(1 for e in els if e.mode == "frames") == 1
+    assert sum(1 for e in els if e.mode == "rise") == 3
+
+
+def test_icon_badge_renders_a_distinct_glyph_per_icon():
+    for icon in ("money", "growth", "idea", "video", "social", "check"):
+        timeline = CaptionTimeline(captions=[_cap(0.0, 1.5, "context line here", "plain", icon=icon)])
+        layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640)
+        band = layer.frame_rgba(0.9)
+        assert band[..., 3].max() > 0, icon
+        # The badge sits left of the text block, inside the caption band.
+        ys, xs = np.nonzero(band[..., 3] > 20)
+        assert xs.min() < layer.width * 0.35, icon
+
+
+def test_icon_never_appears_on_a_money_chip_line():
+    """The chip pill is already the 'notice this' signal — a redundant money
+    badge on top of it would double up on the same figure."""
+    from app.captions.craft import CaptionDraft, LineNote, assign_styles
+    from app.transcription.models import Word
+
+    text = "well so last year I earned $500 today"
+    words = [Word(word=w, start=i * 1.0, end=i * 1.0 + 0.9) for i, w in enumerate(text.split())]
+    drafts = [
+        CaptionDraft(first=0, last=3, text="well so last year"),
+        CaptionDraft(first=4, last=7, text="I earned $500 today"),
+    ]
+    notes = [LineNote(), LineNote(key="$500", weight=3, kind="term", icon="money")]
+    out = assign_styles(drafts, notes, words)
+    assert out[1].style == "chip"
+    assert out[1].icon == "none"
 
 
 def test_soundtrack_graph_ducks_music_under_voice(tmp_path: Path):

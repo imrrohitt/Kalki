@@ -86,6 +86,13 @@ class CaptionDraft:
     sub: str = ""
     style: str = "plain"
     emphasis: str = ""
+    # AI-judged context, not a look: mood drives the reveal motion (a "blink"
+    # pop for a surprise or an excited beat); icon is a small contextual badge
+    # (money, growth, a key idea, a platform mention...). Both come from the
+    # director's annotate pass — see LineNote — and stay "neutral"/"" for the
+    # vast majority of lines.
+    mood: str = "neutral"
+    icon: str = "none"
 
     @property
     def tokens(self) -> list[str]:
@@ -221,11 +228,22 @@ def _split_long(d: CaptionDraft, words: list[Word]) -> list[CaptionDraft]:
     left_text = " ".join(tokens[:half])
     right_text = " ".join(tokens[half:])
 
-    def part(first: int, last: int, text: str, style: str) -> CaptionDraft:
+    def part(first: int, last: int, text: str, style: str, *, carry: bool) -> CaptionDraft:
         emphasis = d.emphasis if _emphasis_ok(text, d.emphasis) else ""
         if style == "mix" and not emphasis:
             style = "plain"
-        return CaptionDraft(first=first, last=last, text=text, style=style, emphasis=emphasis)
+        return CaptionDraft(
+            first=first,
+            last=last,
+            text=text,
+            style=style,
+            emphasis=emphasis,
+            # A split line keeps its mood/icon on the first half only — a
+            # badge or a pop on both fragments of one broken sentence reads
+            # as a glitch, not a highlight.
+            mood=d.mood if carry else "neutral",
+            icon=d.icon if carry else "none",
+        )
 
     if d.style in BIG_STYLES:
         # The half that carries the content keeps the serif; the other reads plain.
@@ -236,8 +254,8 @@ def _split_long(d: CaptionDraft, words: list[Word]) -> list[CaptionDraft]:
         left_style = right_style = "mix"
     else:
         left_style = right_style = "plain"
-    left = part(d.first, cut - 1, left_text, left_style)
-    right = part(cut, d.last, right_text, right_style)
+    left = part(d.first, cut - 1, left_text, left_style, carry=True)
+    right = part(cut, d.last, right_text, right_style, carry=False)
     return _split_long(left, words) + _split_long(right, words)
 
 
@@ -282,7 +300,10 @@ def enforce_design_rules(drafts: list[CaptionDraft], words: list[Word]) -> list[
             sub = ""
         emphasis = clean_copy(d.emphasis).strip(",?!") if d.emphasis else ""
         cleaned.append(
-            CaptionDraft(first=d.first, last=d.last, text=text, sub=sub, style=style, emphasis=emphasis)
+            CaptionDraft(
+                first=d.first, last=d.last, text=text, sub=sub, style=style, emphasis=emphasis,
+                mood=d.mood, icon=d.icon,
+            )
         )
 
     covered = _normalize_coverage(cleaned, len(words))
@@ -389,7 +410,13 @@ def _merge_flashes(drafts: list[CaptionDraft], words: list[Word], floor: float =
             lo, hi = min(i, j), max(i, j)
             out[lo : hi + 1] = [
                 CaptionDraft(
-                    first=a.first, last=b.last, text=" ".join(tokens), style=style, emphasis=emphasis
+                    first=a.first,
+                    last=b.last,
+                    text=" ".join(tokens),
+                    style=style,
+                    emphasis=emphasis,
+                    mood=keep.mood,
+                    icon=keep.icon,
                 )
             ]
             merged = True
@@ -401,15 +428,30 @@ def _merge_flashes(drafts: list[CaptionDraft], words: list[Word], floor: float =
 
 
 LINE_KINDS = ("payoff", "concept", "term", "drama", "quote", "normal")
+# Genuine emotional beats the delivery calls for. Most lines are "neutral" —
+# these exist so a real surprise or a real high can move, not every line.
+MOODS = ("neutral", "surprise", "excited", "happy", "serious", "urgent")
+MOODS_THAT_POP = {"surprise", "excited"}
+# A small vocabulary of contextual badges. "none" is the right answer for
+# nearly every line; these are rare accents, not decoration.
+ICONS = ("none", "money", "growth", "idea", "video", "social", "check")
+# Minimum seconds between two pops / two icon badges, independent of caption
+# style — these are motion and iconography, not the cream-word rarity above.
+POP_MIN_GAP = 9.0
+ICON_MIN_GAP = 16.0
 
 
 @dataclass(frozen=True)
 class LineNote:
-    """The director's judgement of one line."""
+    """The director's judgement of one line: what it says, what it means, and
+    the two context signals — mood and icon — that the annotate prompt reads
+    straight off the speaker's words and delivery."""
 
     key: str = ""
     weight: int = 1
     kind: str = "normal"
+    mood: str = "neutral"
+    icon: str = "none"
 
 
 def _strip_greeting(text: str) -> str:
@@ -586,6 +628,39 @@ def assign_styles(
         for i in weakest[: len(mixes) - budget]:
             styles[i], emphasis[i] = "plain", ""
 
+    # 8. Mood: a real surprise or a real high gets a pop/"blink" reveal instead
+    #    of the usual smooth rise — never on a plain connective line, never two
+    #    in quick succession, so the motion still reads as a highlight.
+    mood = ["neutral"] * n
+    last_pop = -99.0
+    for i in order:
+        note = notes[i]
+        if (
+            note.mood in MOODS_THAT_POP
+            and styles[i] != "plain"
+            and i not in stacked
+            and times[i] - last_pop >= POP_MIN_GAP
+        ):
+            mood[i] = note.mood
+            last_pop = times[i]
+
+    # 9. Icon: a small contextual badge on the rare line that is genuinely
+    #    about money, growth, an idea, a platform, outreach, or a proof point.
+    icon = ["none"] * n
+    last_icon = -99.0
+    for i in order:
+        note = notes[i]
+        if (
+            note.icon in ICONS
+            and note.icon != "none"
+            and note.weight >= 2
+            and i not in stacked
+            and styles[i] != "chip"  # the pill already is the "notice this" signal
+            and times[i] - last_icon >= ICON_MIN_GAP
+        ):
+            icon[i] = note.icon
+            last_icon = times[i]
+
     out: list[CaptionDraft] = []
     absorbed = set(stacked.values())
     for i, d in enumerate(drafts):
@@ -593,9 +668,19 @@ def assign_styles(
             continue
         if i in stacked:
             nxt = drafts[stacked[i]]
-            out.append(replace(d, text=texts[i], sub=nxt.text, last=nxt.last, style="stack", emphasis=""))
+            out.append(
+                replace(
+                    d, text=texts[i], sub=nxt.text, last=nxt.last, style="stack", emphasis="",
+                    mood=mood[i], icon=icon[i],
+                )
+            )
             continue
-        out.append(replace(d, text=texts[i], style=styles[i], emphasis=emphasis[i]))
+        out.append(
+            replace(
+                d, text=texts[i], style=styles[i], emphasis=emphasis[i],
+                mood=mood[i], icon=icon[i],
+            )
+        )
     return out
 
 
@@ -815,6 +900,8 @@ def drafts_to_timeline(
                 text=text,
                 treatment=d.style,  # type: ignore[arg-type]
                 words=cap_words,
+                mood=d.mood,
+                icon=d.icon,
             )
         )
     return CaptionTimeline(captions=captions)

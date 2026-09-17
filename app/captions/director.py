@@ -33,9 +33,11 @@ from openai import AsyncOpenAI
 from app.asr import stabilize_copy
 from app.captions.craft import (
     FILLER,
+    ICONS,
+    LINE_KINDS,
+    MOODS,
     MUSIC_MOODS,
     STYLE_NAMES,
-    LINE_KINDS,
     CaptionDraft,
     LineNote,
     align_phrases,
@@ -128,11 +130,13 @@ each line 1-5 words and never move words from a neighbouring line into it.
 
 ANNOTATE_SYSTEM = """You are the art director of a premium Reels caption edit. You get every
 caption line in order with its time, plus the brief. Judge what each line means to the
-viewer; the studio's design system turns your judgement into the look (cream serif words,
-serif lines, hand-drawn ovals, underlines, tape stickers).
+viewer AND how the speaker is actually delivering it; the studio's design system turns
+your judgement into the look (cream serif words, serif lines, hand-drawn ovals,
+underlines, tape stickers) and the motion (a still rise, or a quick "blink" pop for a
+real high) and the rare contextual icon.
 
 Return JSON only:
-{"lines": [{"i": 0, "key": "interviews", "weight": 1, "kind": "normal"}]}
+{"lines": [{"i": 0, "key": "interviews", "weight": 1, "kind": "normal", "mood": "neutral", "icon": "none"}]}
 
 For EVERY line:
 - `key`: the single most meaningful word, or 2-word term, copied exactly from the line
@@ -150,9 +154,32 @@ For EVERY line:
     drama    one emotionally charged word ("rejections", "mistake")
     quote    a rule of thumb or a quoted line
     normal   everything else
+- `mood`: the genuine emotional charge of THIS line's delivery, judged from the words and
+  where it sits in the story — not decoration, a real read of tone:
+    neutral   ordinary matter-of-fact delivery — the vast majority of lines
+    surprise  a twist, a shocking number, an unexpected reveal ("I got rejected 40 times")
+    excited   a visible high, a win the speaker is clearly hyped about ("and it blew up")
+    happy     warm, encouraging, a positive turn
+    serious   a warning or a hard truth the viewer must take seriously
+    urgent    time pressure, "right now" energy, a deadline
+  Be strict: `surprise` and `excited` are rare, maybe 1-3 lines in a whole reel — the ones
+  that would make YOU say "wait, what?" or genuinely light up reading them aloud. Do not
+  mark a line surprise/excited just because it has a number or an exclamation in the
+  transcript; judge the actual emotional weight of what is being said.
+- `icon`: "none" for nearly every line. Only name an icon when the line is unmistakably
+  ABOUT one of these, not just adjacent to the idea:
+    money   a specific amount, price, or earnings figure
+    growth  scaling, results, a metric going up
+    idea    the single key insight or "aha" of the video
+    video   making/posting video content, YouTube, Reels, a platform for content
+    social  DMs, comments, outreach, LinkedIn/Twitter/Instagram engagement
+    check   a completed step, a proof point, a "that's it" confirmation
+  Icons are rare accents (a handful per video at most) — "none" is almost always right.
 
-Be a strict editor: most lines are weight 0-1. The opening line with real content, and
-the brief's key_ideas at the moment they are said, deserve weight 2-3.
+Be a strict editor: most lines are weight 0-1, mood neutral, icon none. The opening line
+with real content, and the brief's key_ideas at the moment they are said, deserve weight
+2-3 — but that does not automatically mean surprise/excited/an icon; judge each signal
+on its own.
 """
 
 
@@ -199,6 +226,8 @@ class DirectorResult:
                 "sub": d.sub,
                 "style": d.style,
                 "emphasis": d.emphasis,
+                "mood": d.mood,
+                "icon": d.icon,
                 "key": note.key,
                 "weight": note.weight,
                 "kind": note.kind,
@@ -347,6 +376,18 @@ def annotation_problems(data: dict[str, Any], lines: list[str]) -> list[str]:
     heavy = sum(1 for item in seen.values() if _as_int(item.get("weight")) >= 3)
     if heavy > max(2, len(lines) // 6):
         problems.append(f"{heavy} lines have weight 3; keep weight 3 for about one line in eight")
+
+    popped = sum(1 for item in seen.values() if str(item.get("mood") or "neutral") in {"surprise", "excited"})
+    if popped > max(3, len(lines) // 12):
+        problems.append(
+            f"{popped} lines are marked surprise/excited; keep it to about one in twelve at most — "
+            "most lines are neutral"
+        )
+    iconed = sum(1 for item in seen.values() if str(item.get("icon") or "none") != "none")
+    if iconed > max(4, len(lines) // 10):
+        problems.append(
+            f"{iconed} lines have an icon; icons are rare accents — keep it to about one in ten at most"
+        )
     return problems[:15]
 
 
@@ -575,11 +616,18 @@ class CaptionDirector:
             if not 0 <= i < len(notes):
                 continue
             kind = str(item.get("kind") or "normal").strip().lower()
+            mood = str(item.get("mood") or "neutral").strip().lower()
+            icon = str(item.get("icon") or "none").strip().lower()
             notes[i] = LineNote(
                 key=str(item.get("key") or "").strip(),
                 weight=max(0, min(3, _as_int(item.get("weight"), 1))),
                 kind=kind if kind in LINE_KINDS else "normal",
+                mood=mood if mood in MOODS else "neutral",
+                icon=icon if icon in ICONS else "none",
             )
+        moody = sum(1 for note in notes if note.mood != "neutral")
+        iconed = sum(1 for note in notes if note.icon != "none")
+        logger.info("director annotate: %s lines with a mood, %s with an icon", moody, iconed)
         return notes
 
     # ------------------------------------------------------------------- run
@@ -650,6 +698,12 @@ class CaptionDirector:
         metrics["design_ms"] = int((time.perf_counter() - t3) * 1000)
 
         drafts = enforce_design_rules(drafts, words)
+        logger.info(
+            "[%s] mood/icon after rarity gating: %s pop, %s icon",
+            jid,
+            sum(1 for d in drafts if d.mood != "neutral"),
+            sum(1 for d in drafts if d.icon != "none"),
+        )
         timeline = drafts_to_timeline(drafts, words, video_duration=video_duration)
         return DirectorResult(
             timeline=timeline,
