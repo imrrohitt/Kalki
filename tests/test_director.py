@@ -46,7 +46,11 @@ def test_caption_spans_never_flash():
 
 def test_fix_case_removes_title_case_and_shouting():
     assert fix_case("When I Started Interviewing") == "When I started interviewing"
-    assert fix_case("GIVE AI a try") == "give AI a try"
+    # Long accidental caps get fixed; short tokens are trusted as real acronyms
+    # even when they are not on the fixed ACRONYMS list (WHO, MCA, ROI, ...).
+    assert fix_case("SERIOUSLY stop that") == "seriously stop that"
+    assert fix_case("I did MCA then") == "I did MCA then"
+    assert fix_case("associated with WHO") == "associated with WHO"
 
 
 def test_enforce_rules_keeps_decorations_rare():

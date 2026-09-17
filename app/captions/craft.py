@@ -91,23 +91,34 @@ def norm_token(token: str) -> str:
 
 
 def fix_case(text: str) -> str:
-    """Spoken sentence case guard: no shouting, no Title Case."""
+    """Spoken sentence case guard: no shouting, no Title Case.
+
+    A short all-caps token (<=5 letters: WHO, MCA, ROI, API...) is almost
+    always a real acronym the director capitalized on purpose, even when it
+    is not in the fixed ACRONYMS list — the list can't cover every proper
+    noun or industry term. Only a longer all-caps word is fixed as likely
+    accidental shouting.
+    """
     tokens = text.split()
     if not tokens:
         return text
     out: list[str] = []
     for tok in tokens:
         core = re.sub(r"[^A-Za-z]", "", tok)
-        if len(core) > 1 and core.isupper() and core.upper() not in ACRONYMS:
+        if len(core) > 5 and core.isupper() and core.upper() not in ACRONYMS:
             tok = tok.lower()
         out.append(tok)
     alpha = [re.sub(r"[^A-Za-z]", "", t) for t in out]
-    # "I" and acronyms are capitalized in any case; judge the other words.
-    judged = [a for a in alpha if a and a.upper() not in ACRONYMS and a != "I"]
+    # "I", acronyms, and short all-caps tokens are capitalized on purpose;
+    # judge only the ordinary words for a Title Case run.
+    is_acronym_like = lambda a: a.upper() in ACRONYMS or (len(a) <= 5 and a.isupper())
+    judged = [a for a in alpha if a and not is_acronym_like(a) and a != "I"]
     titled = [a for a in judged if a[0].isupper()]
     if len(out) >= 3 and len(judged) >= 2 and len(titled) == len(judged):
         out = [out[0]] + [
-            t if re.sub(r"[^A-Za-z]", "", t).upper() in ACRONYMS or t in {"I", "I'm", "I've", "I'll", "I'd"}
+            t
+            if is_acronym_like(re.sub(r"[^A-Za-z]", "", t))
+            or t in {"I", "I'm", "I've", "I'll", "I'd"}
             else t.lower()
             for t in out[1:]
         ]
