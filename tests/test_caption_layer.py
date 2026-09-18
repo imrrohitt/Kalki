@@ -4,7 +4,7 @@ import numpy as np
 
 from app.captions.models import Caption, CaptionTimeline, CaptionWord
 from app.editorial.models import SfxHit
-from app.renderer.caption_layer import CaptionLayer
+from app.renderer.caption_layer import BRIGHT_INK, WHITE, CaptionLayer
 from app.renderer.soundtrack import build_soundtrack, plan_accents, synthesize_music_bed
 
 
@@ -122,6 +122,45 @@ def test_icon_never_appears_on_a_money_chip_line():
     out = assign_styles(drafts, notes, words)
     assert out[1].style == "chip"
     assert out[1].icon == "none"
+
+
+def test_caption_color_adapts_to_its_own_background_not_the_whole_video():
+    """A talking head that walks from shade into open sky needs both looks in
+    the SAME render — one flat guess for the whole video would leave half the
+    captions invisible."""
+    timeline = CaptionTimeline(
+        captions=[
+            _cap(0.0, 1.5, "in the shade", "plain"),
+            _cap(5.0, 6.5, "core depth", "oval"),
+            _cap(10.0, 11.5, "in bright sky", "plain"),
+            _cap(15.0, 16.5, "core depth", "oval"),
+        ]
+    )
+    # 0-8s dark background, 8s+ bright background.
+    times = [float(t) for t in range(0, 20)]
+    values = [40.0 if t < 8 else 220.0 for t in times]
+    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640, bg_luma_times=times, bg_luma_values=values)
+
+    dark_body = _dominant_color(layer, timeline.captions[0])
+    bright_body = _dominant_color(layer, timeline.captions[2])
+    assert dark_body == WHITE
+    assert bright_body == BRIGHT_INK
+
+    dark_hair = _dominant_color(layer, timeline.captions[1], hairline=True)
+    bright_hair = _dominant_color(layer, timeline.captions[3], hairline=True)
+    assert dark_hair != bright_hair  # the oval ring also flips, not just body text
+
+
+def _dominant_color(layer: CaptionLayer, cap: Caption, *, hairline: bool = False):
+    band = layer.frame_rgba(min(cap.start + 0.6, cap.end - 0.15))
+    alpha = band[..., 3]
+    # Fully opaque glyph pixels only — anti-aliased edges blend toward the
+    # transparent shadow halo and would pull the average off the true color.
+    mask = alpha > 250 if not hairline else (alpha > 10) & (alpha < 200)
+    ys, xs = np.nonzero(mask)
+    assert len(ys) > 0
+    pixels = band[ys, xs, :3].astype(np.float64)
+    return tuple(int(round(v)) for v in pixels.mean(axis=0))
 
 
 def test_soundtrack_graph_ducks_music_under_voice(tmp_path: Path):
