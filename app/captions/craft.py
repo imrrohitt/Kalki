@@ -439,6 +439,10 @@ ICONS = ("none", "money", "growth", "idea", "video", "social", "check")
 # style — these are motion and iconography, not the cream-word rarity above.
 POP_MIN_GAP = 9.0
 ICON_MIN_GAP = 16.0
+# The opening stretch that decides whether someone keeps watching. It gets
+# first claim on rare accents at a slightly lower bar than the rest of the
+# reel — a richer, more varied hook, never invented onto filler.
+HOOK_WINDOW_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -574,6 +578,31 @@ def assign_styles(
         if len(texts[i].split()) <= MAX_WORDS["serif"] and clear(i, "serif"):
             styles[i] = "serif"
 
+    # 4.5 Front-load the hook: the first ~30s decides whether someone keeps
+    #     watching, so it gets first claim on the rare hand-drawn accents at a
+    #     slightly lower bar than the rest of the reel — never invented onto
+    #     filler, just given priority when a real candidate already exists.
+    hook_window = [i for i in range(n) if times[i] - times[0] < HOOK_WINDOW_SECONDS]
+
+    def hook_rank(i: int) -> tuple[int, int, float]:
+        content = [t for t in texts[i].split() if norm_token(t) not in FILLER]
+        return (notes[i].weight, len(content), -times[i])
+
+    for style, limit in (("oval", MAX_WORDS["oval"]), ("underline", MAX_WORDS["underline"])):
+        if any(styles[i] == style for i in hook_window):
+            continue
+        for i in sorted(hook_window, key=hook_rank, reverse=True):
+            if not free(i) or notes[i].weight < 1:
+                continue
+            key = _key_for(texts[i], notes[i].key) or _content_word(texts[i].split())
+            if len(texts[i].split()) > limit or len(norm_token(key)) < 4:
+                continue
+            if not clear(i, style):
+                continue
+            styles[i] = style
+            emphasis[i] = key if style == "underline" else ""
+            break
+
     # 5. Fill to the reel's rhythm: the judged lines are often too few for the
     #    look, so the strongest free lines take the remaining slots.
     seconds = max(times[-1] - times[0], 1.0)
@@ -660,6 +689,22 @@ def assign_styles(
         ):
             icon[i] = note.icon
             last_icon = times[i]
+
+    # The hook gets one icon at a slightly lower weight bar too, same
+    # reasoning as the accents above — only if the director actually flagged
+    # one in that window; never invented.
+    if not any(icon[i] != "none" for i in hook_window):
+        for i in sorted(hook_window, key=lambda j: times[j]):
+            note = notes[i]
+            if (
+                note.icon in ICONS
+                and note.icon != "none"
+                and note.weight >= 1
+                and i not in stacked
+                and styles[i] != "chip"
+            ):
+                icon[i] = note.icon
+                break
 
     out: list[CaptionDraft] = []
     absorbed = set(stacked.values())

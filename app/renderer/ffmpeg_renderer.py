@@ -213,25 +213,45 @@ class FFmpegRenderer:
             w = target_w
         return w - (w % 2), h - (h % 2)
 
-    def _sample_band(self, source_video: str, *, width: int, height: int, top: int, bottom: int, duration: float) -> list:
+    def _sample_band_luma_track(
+        self,
+        source_video: str,
+        *,
+        width: int,
+        height: int,
+        top: int,
+        bottom: int,
+        duration: float,
+        sample_fps: float = 2.0,
+    ) -> tuple[list[float], list[float]]:
+        """One decode pass: mean luminance of the caption band across the
+        whole reel at a low rate, so each caption can read the background
+        under ITS OWN moment instead of one guess for the whole video — a
+        talking head walking from shade into open sky needs both."""
         import numpy as np
 
-        small_w = 216
+        small_w = 96
         small_h = max(2, int(round(height * small_w / width)))
-        y0 = int(top * small_h / height)
+        y0 = min(small_h - 1, int(top * small_h / height))
         y1 = max(y0 + 1, int(bottom * small_h / height))
-        frames = []
-        for frac in (0.15, 0.45, 0.75):
-            cmd = [
-                settings.ffmpeg_path, "-v", "error", "-ss", f"{max(0.0, duration * frac):.2f}",
-                "-i", source_video, "-frames:v", "1",
-                "-vf", f"scale={small_w}:{small_h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
-            ]
-            raw = subprocess.run(cmd, capture_output=True).stdout
-            if len(raw) == small_w * small_h * 3:
-                frame = np.frombuffer(raw, np.uint8).reshape(small_h, small_w, 3)
-                frames.append(frame[y0:y1].astype(np.float32))
-        return frames
+        band_h = y1 - y0
+        cmd = [
+            settings.ffmpeg_path, "-v", "error", "-i", source_video,
+            "-vf", f"fps={sample_fps},scale={small_w}:{small_h},crop={small_w}:{band_h}:0:{y0},format=gray",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-",
+        ]
+        try:
+            raw = subprocess.run(cmd, capture_output=True, timeout=60).stdout
+        except subprocess.TimeoutExpired:
+            return [], []
+        frame_size = small_w * band_h
+        if frame_size <= 0 or len(raw) < frame_size:
+            return [], []
+        count = len(raw) // frame_size
+        arr = np.frombuffer(raw[: count * frame_size], np.uint8).reshape(count, band_h, small_w)
+        luma = arr.astype(np.float32).mean(axis=(1, 2))
+        times = [i / sample_fps for i in range(count)]
+        return times, luma.tolist()
 
     def render_overlay_reel(
         self,
@@ -246,7 +266,7 @@ class FFmpegRenderer:
         """Full-frame talking head with the premium caption layer and soundtrack."""
         import tempfile
 
-        from app.renderer.caption_layer import CaptionLayer, band_is_bright
+        from app.renderer.caption_layer import CaptionLayer
         from app.renderer.soundtrack import (
             build_soundtrack,
             pick_music_track,
@@ -268,15 +288,16 @@ class FFmpegRenderer:
         layer = CaptionLayer(
             caption_timeline, width=out_w, height=out_h, fps=fps, head_top=head_top
         )
-        bright = band_is_bright(
-            self._sample_band(
-                source_video,
-                width=out_w,
-                height=out_h,
-                top=layer.band_top,
-                bottom=layer.band_top + layer.band_height,
-                duration=duration,
-            )
+        # Real per-moment background intelligence: one cheap low-res decode of
+        # the whole reel gives every caption its own bright/dark read, instead
+        # of one guess for the entire video — text color adapts per caption.
+        luma_times, luma_values = self._sample_band_luma_track(
+            source_video,
+            width=out_w,
+            height=out_h,
+            top=layer.band_top,
+            bottom=layer.band_top + layer.band_height,
+            duration=duration,
         )
         layer = CaptionLayer(
             caption_timeline,
@@ -284,7 +305,8 @@ class FFmpegRenderer:
             height=out_h,
             fps=fps,
             head_top=head_top,
-            bright_background=bright,
+            bg_luma_times=luma_times,
+            bg_luma_values=luma_values,
         )
         n_frames = int(math.ceil(duration * fps))
 
@@ -340,10 +362,13 @@ class FFmpegRenderer:
         staging.unlink(missing_ok=True)
         cmd.append(str(staging))
 
+        bright_frac = (
+            sum(1 for v in luma_values if v > 150.0) / len(luma_values) if luma_values else 0.0
+        )
         logger.info(
-            "ffmpeg overlay-reel %sx%s@%sfps band=%s@%s upscaled=%s bright=%s "
+            "ffmpeg overlay-reel %sx%s@%sfps band=%s@%s upscaled=%s bright=%.0f%% of reel "
             "captions=%s accents=%s music=%s crf=%s preset=%s",
-            out_w, out_h, fps, layer.band_height, layer.band_top, upscaled, bright,
+            out_w, out_h, fps, layer.band_height, layer.band_top, upscaled, bright_frac * 100,
             len(caption_timeline.captions), len(accents or []),
             music_path.name if music_path else None,
             settings.overlay_crf, settings.overlay_preset,

@@ -39,6 +39,17 @@ CREAM = (255, 246, 194)
 TAPE_FILL = (176, 196, 170)
 TAPE_INK = (38, 26, 19)
 HAIRLINE = (240, 238, 232)
+# On a bright wall or sky, white-on-white (or a pale cream hairline) goes
+# invisible. Each caption samples the real background under it and, when it
+# reads bright, flips to this dark set instead — same warm identity, same
+# hue family (a deep espresso-gold in place of pale cream), inverted for
+# contrast. Chip/tape/badges already sit on a solid fill and never need this.
+BRIGHT_INK = (26, 24, 22)
+BRIGHT_GOLD = (120, 84, 18)
+BRIGHT_HAIRLINE = (46, 42, 36)
+# Mean band luminance (0-255) above which a caption is judged to sit on a
+# bright background.
+BRIGHT_LUMA_THRESHOLD = 150.0
 # Premium colored pill for a line naming a concrete figure (money, %, a round
 # number) — alternated so a two-chip video doesn't repeat the same color.
 CHIP_COLORS = [(22, 34, 49), (140, 72, 40)]  # deep ink-navy, warm terracotta
@@ -257,12 +268,22 @@ class CaptionLayer:
         fps: int = 30,
         head_top: int | None = None,
         bright_background: bool = False,
+        bg_luma_times: list[float] | None = None,
+        bg_luma_values: list[float] | None = None,
     ) -> None:
         self.width = width
         self.height = height
         self.fps = fps
         self.u = width / 1080.0
+        # Fallback for when no per-time track is available (tests, or a
+        # detection failure): one flat guess for the whole reel, same as
+        # before. When the track is present each caption judges its own
+        # moment instead — a video that walks from shade into open sky needs
+        # both looks, not one global guess.
+        self._default_bright = bright_background
         self.shadow = 1.4 if bright_background else 1.0
+        self._luma_times = np.asarray(bg_luma_times, np.float32) if bg_luma_times else None
+        self._luma_values = np.asarray(bg_luma_values, np.float32) if bg_luma_values else None
         self.captions: list[Caption] = sorted(timeline.captions, key=lambda c: c.start)
         u = self.u
         head = head_top if head_top else int(height * 0.30)
@@ -372,7 +393,35 @@ class CaptionLayer:
         self._uid += 1
         return Element(uid=self._uid, **kwargs)
 
-    def _tokens(self, cap: Caption, index: int) -> list[list[_Token]]:
+    def _is_bright(self, cap: Caption) -> bool:
+        """Real background intelligence: the mean luminance of the video
+        under THIS caption's own on-screen window, not a single guess for
+        the whole reel — a talking head walking from shade into open sky
+        needs white text in one and dark ink in the other."""
+        if self._luma_times is None or self._luma_values is None or len(self._luma_times) == 0:
+            return self._default_bright
+        mask = (self._luma_times >= cap.start) & (self._luma_times <= cap.end)
+        if not mask.any():
+            idx = int(np.argmin(np.abs(self._luma_times - cap.start)))
+            sample = float(self._luma_values[idx])
+        else:
+            sample = float(self._luma_values[mask].mean())
+        return sample > BRIGHT_LUMA_THRESHOLD
+
+    def _palette_for(self, bright: bool) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
+        """(body, accent, hairline) — the dark set on a bright wall or sky,
+        the usual cream-and-white set otherwise."""
+        if bright:
+            return BRIGHT_INK, BRIGHT_GOLD, BRIGHT_HAIRLINE
+        return WHITE, CREAM, HAIRLINE
+
+    def _tokens(
+        self,
+        cap: Caption,
+        index: int,
+        palette: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]],
+    ) -> list[list[_Token]]:
+        body_color, accent_color, _hair = palette
         treatment = cap.treatment or "plain"
         if treatment == "blob":
             treatment = "tape"
@@ -397,18 +446,18 @@ class CaptionLayer:
                     tok = _Token(word, text, SANS_FONT, FS_CHIP, CHIP_TEXT, shadow=False)
                 elif treatment == "stack":
                     if li == 0:
-                        tok = _Token(word, text, SERIF_FONT, FS_HOOK, CREAM)
+                        tok = _Token(word, text, SERIF_FONT, FS_HOOK, accent_color)
                     else:
-                        tok = _Token(word, text, SANS_FONT, FS_SUB, WHITE)
+                        tok = _Token(word, text, SANS_FONT, FS_SUB, body_color)
                 elif treatment in SERIF_LINE_STYLES:
-                    tok = _Token(word, text, SERIF_FONT, FS_HOOK if hook else FS_SERIF, CREAM)
+                    tok = _Token(word, text, SERIF_FONT, FS_HOOK if hook else FS_SERIF, accent_color)
                 elif word.emphasis and treatment in {"mix", "underline", "plain"}:
                     if single_emphasis and _is_acronym(text):
-                        tok = _Token(word, text, SANS_FONT, FS_ACRONYM, CREAM)
+                        tok = _Token(word, text, SANS_FONT, FS_ACRONYM, accent_color)
                     else:
-                        tok = _Token(word, text, SERIF_FONT, FS_SERIF_INLINE, CREAM)
+                        tok = _Token(word, text, SERIF_FONT, FS_SERIF_INLINE, accent_color)
                 else:
-                    tok = _Token(word, text, SANS_FONT, FS_SANS, WHITE)
+                    tok = _Token(word, text, SANS_FONT, FS_SANS, body_color)
                 line.append(tok)
             k += count
             if treatment == "quote" and line:
@@ -445,7 +494,16 @@ class CaptionLayer:
         treatment = cap.treatment or "plain"
         if treatment == "blob":
             treatment = "tape"
-        lines = self._tokens(cap, index)
+        # Real background intelligence, judged fresh for this caption's own
+        # on-screen window: white-on-white is a real failure mode on a bright
+        # wall or open sky, so a bright moment gets the dark-ink/deep-gold
+        # set instead of the usual white/cream — same shadow logic, inverted
+        # so the halo still reads as contrast rather than a glow that blends
+        # straight into the background.
+        bright = self._is_bright(cap)
+        self.shadow = 1.4 if bright else 1.0
+        palette = self._palette_for(bright)
+        lines = self._tokens(cap, index, palette)
         max_w = self.width * MAX_LINE_FRAC
         if treatment in {"tape", "chip"}:
             max_w -= 2 * 64 * u
@@ -518,9 +576,9 @@ class CaptionLayer:
             return elements
         first = line_meta[0]
         if treatment == "oval":
-            elements[:0] = self._oval(cap, first)
+            elements[:0] = self._oval(cap, first, palette[2])
         elif treatment == "underline":
-            elements.extend(self._underline(cap, line_meta[-1], lines[-1]))
+            elements.extend(self._underline(cap, line_meta[-1], lines[-1], palette[2]))
         elif treatment == "tape":
             elements[:0] = self._tape(cap, first, index)
         elif treatment == "chip":
@@ -530,7 +588,7 @@ class CaptionLayer:
         return elements
 
     # ---------------------------------------------------------- decorations
-    def _oval(self, cap: Caption, meta) -> list[Element]:
+    def _oval(self, cap: Caption, meta, hair: tuple[int, int, int] = HAIRLINE) -> list[Element]:
         u = self.u
         x0, x1, top, bottom, size = meta
         cx = (x0 + x1) / 2
@@ -560,7 +618,7 @@ class CaptionLayer:
             shade = np.asarray(small.filter(ImageFilter.GaussianBlur(3 * u)), np.float32) / 255.0
             alpha = 1.0 - (1.0 - m * 0.96) * (1.0 - shade * 0.34 * self.shadow)
             arr = np.zeros((H, W, 4), np.float32)
-            col = np.array(HAIRLINE, np.float32) / 255.0
+            col = np.array(hair, np.float32) / 255.0
             arr[..., :3] = col * (m * 0.96)[..., None]
             arr[..., 3] = alpha
             frames.append(arr)
@@ -571,8 +629,8 @@ class CaptionLayer:
                 frames=frames, x=int(cx), y=int(cy),
             )
         ]
-        spark_a = _astroid(max(8, int(25 * u)), HAIRLINE)
-        spark_b = _astroid(max(9, int(31 * u)), HAIRLINE)
+        spark_a = _astroid(max(8, int(25 * u)), hair)
+        spark_b = _astroid(max(9, int(31 * u)), hair)
         rad = math.radians(tilt)
         for arr, (ex, ey), delay in (
             (spark_a, (-0.93 * rx, -0.50 * ry), 0.34),
@@ -589,7 +647,9 @@ class CaptionLayer:
             )
         return els
 
-    def _underline(self, cap: Caption, meta, tokens: list[_Token]) -> list[Element]:
+    def _underline(
+        self, cap: Caption, meta, tokens: list[_Token], hair: tuple[int, int, int] = HAIRLINE
+    ) -> list[Element]:
         u = self.u
         x0, x1, top, bottom, size = meta
         width = (x1 - x0) + 70 * u
@@ -611,13 +671,13 @@ class CaptionLayer:
         m = np.asarray(small, np.float32) / 255.0
         shade = np.asarray(small.filter(ImageFilter.GaussianBlur(2.5 * u)), np.float32) / 255.0
         arr = np.zeros((H, W, 4), np.float32)
-        arr[..., :3] = (np.array(HAIRLINE, np.float32) / 255.0) * m[..., None]
+        arr[..., :3] = (np.array(hair, np.float32) / 255.0) * m[..., None]
         arr[..., 3] = 1.0 - (1.0 - m) * (1.0 - shade * 0.35 * self.shadow)
         emph = [tok.word.start for tok in tokens if tok.word.emphasis]
         t0 = max(cap.start + 0.12, min(emph) if emph else cap.start + 0.12)
         t0 = min(t0, max(cap.start, cap.end - 0.45))
         cx = (x0 + x1) / 2
-        star = _astroid(max(7, int(17 * u)), HAIRLINE)
+        star = _astroid(max(7, int(17 * u)), hair)
         pops = [_scaled(star, s) for s in (0.25, 0.6, 0.95, 1.2, 1.06, 1.0)]
         return [
             self._element(
@@ -815,11 +875,3 @@ class CaptionLayer:
                 arr=arr, x=int(cx - W / 2), y=int(cy - H / 2),
             )
         ]
-
-
-def band_is_bright(frames: list[np.ndarray]) -> bool:
-    """True when the wall behind the captions is light enough to need more shadow."""
-    if not frames:
-        return False
-    lum = [float(np.mean(f[..., :3] @ np.array([0.2126, 0.7152, 0.0722]))) for f in frames]
-    return float(np.median(lum)) > 125.0
