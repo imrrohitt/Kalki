@@ -331,6 +331,7 @@ class Pipeline:
                 video_duration=duration,
                 job_id=job.job_id,
                 reference_text=reference_text,
+                audio_path=str(audio_path) if audio_path.exists() else None,
             )
             timeline = result.timeline
             brief_mood = result.brief.music_mood

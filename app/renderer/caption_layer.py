@@ -52,7 +52,7 @@ BRIGHT_HAIRLINE = (46, 42, 36)
 BRIGHT_LUMA_THRESHOLD = 150.0
 # Premium colored pill for a line naming a concrete figure (money, %, a round
 # number) — alternated so a two-chip video doesn't repeat the same color.
-CHIP_COLORS = [(22, 34, 49), (140, 72, 40)]  # deep ink-navy, warm terracotta
+CHIP_COLORS = [(22, 34, 49), (140, 72, 40), (33, 58, 47)]  # ink-navy, terracotta, forest
 CHIP_TEXT = (255, 250, 236)
 CHIP_SPARK = (255, 250, 232)
 
@@ -200,6 +200,30 @@ def _trim_alpha(arr: np.ndarray, pad: int = 2) -> np.ndarray:
     y0, y1 = max(0, ys.min() - pad), min(arr.shape[0], ys.max() + 1 + pad)
     x0, x1 = max(0, xs.min() - pad), min(arr.shape[1], xs.max() + 1 + pad)
     return arr[y0:y1, x0:x1]
+
+
+def _star5(size: int, color: tuple[int, int, int]) -> np.ndarray:
+    """A proper 5-point star (quality/rating) — distinct from the 4-point
+    sparkle used for decorative accents."""
+    ss = 4
+    r = size * ss
+    dim = int(r * 2.6)
+    img = Image.new("L", (dim, dim), 0)
+    c = dim / 2
+    inner = r * 0.42
+    pts = []
+    for k in range(10):
+        rad = r if k % 2 == 0 else inner
+        th = -math.pi / 2 + k * math.pi / 5
+        pts.append((c + rad * math.cos(th), c + rad * math.sin(th)))
+    ImageDraw.Draw(img).polygon(pts, fill=255)
+    small = img.resize((dim // ss, dim // ss), Image.LANCZOS)
+    m = np.asarray(small, np.float32) / 255.0
+    out = np.zeros(m.shape + (4,), np.float32)
+    col = np.array(color, np.float32) / 255.0
+    out[..., :3] = col * m[..., None]
+    out[..., 3] = m
+    return out
 
 
 def _scaled(arr: np.ndarray, scale: float) -> np.ndarray:
@@ -694,17 +718,20 @@ class CaptionLayer:
         """A small premultiplied-RGBA glyph: a currency/@ character for the
         text-based icons, a hand-drawn shape for the rest."""
         color = CHIP_SPARK
-        if icon in {"money", "social"}:
-            char = "@" if icon == "social" else "₹"
+        if icon in {"money", "social", "question"}:
+            char = {"social": "@", "question": "?"}.get(icon, "₹")
             sprite = text_sprite(char, _font(SANS_FONT, max(10, int(size * 1.4))), color, u=u, shadow=0.0)
             return _trim_alpha(sprite.arr)
         if icon == "idea":
             return _astroid(max(6, size // 2), color, glow=False)
+        if icon == "star":
+            return _star5(max(6, int(size * 0.56)), color)
         ss = 4
         D = max(8, size)
         img = Image.new("L", (D * ss, D * ss), 0)
         d = ImageDraw.Draw(img)
         cx, cy = D * ss / 2, D * ss / 2
+        stroke = max(2, int(D * ss * 0.09))
         if icon == "growth":
             w, h = D * ss * 0.5, D * ss * 0.5
             d.polygon(
@@ -721,6 +748,60 @@ class CaptionLayer:
         elif icon == "check":
             pts = [(D * ss * 0.22, D * ss * 0.52), (D * ss * 0.42, D * ss * 0.74), (D * ss * 0.80, D * ss * 0.26)]
             d.line(pts, fill=255, width=max(2, int(D * ss * 0.13)), joint="curve")
+        elif icon == "warning":
+            r = D * ss * 0.40
+            top = (cx, cy - r)
+            bl = (cx - r * 0.92, cy + r * 0.72)
+            br = (cx + r * 0.92, cy + r * 0.72)
+            d.polygon([top, bl, br], outline=255, width=stroke)
+            d.line([(cx, cy - r * 0.18), (cx, cy + r * 0.22)], fill=255, width=stroke)
+            d.ellipse(
+                [cx - stroke * 0.7, cy + r * 0.42, cx + stroke * 0.7, cy + r * 0.42 + stroke * 1.4],
+                fill=255,
+            )
+        elif icon == "time":
+            r = D * ss * 0.36
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=255, width=stroke)
+            d.line([(cx, cy), (cx, cy - r * 0.55)], fill=255, width=stroke)
+            d.line([(cx, cy), (cx + r * 0.42, cy + r * 0.20)], fill=255, width=stroke)
+        elif icon == "target":
+            for frac in (1.0, 0.55):
+                rr = D * ss * 0.38 * frac
+                d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=255, width=stroke)
+            dot = D * ss * 0.08
+            d.ellipse([cx - dot, cy - dot, cx + dot, cy + dot], fill=255)
+        elif icon == "fire":
+            r = D * ss * 0.40
+            d.polygon(
+                [
+                    (cx, cy - r), (cx + r * 0.55, cy - r * 0.15), (cx + r * 0.42, cy + r * 0.35),
+                    (cx + r * 0.18, cy + r * 0.55), (cx + r * 0.30, cy + r * 0.05),
+                    (cx, cy + r * 0.35), (cx - r * 0.30, cy + r * 0.05), (cx - r * 0.18, cy + r * 0.55),
+                    (cx - r * 0.42, cy + r * 0.35), (cx - r * 0.55, cy - r * 0.15),
+                ],
+                fill=255,
+            )
+        elif icon == "heart":
+            r = D * ss * 0.24
+            d.ellipse([cx - 2 * r + r * 0.15, cy - r * 1.05, cx + r * 0.15, cy + r * 0.95], fill=255)
+            d.ellipse([cx - r * 0.15, cy - r * 1.05, cx + 2 * r - r * 0.15, cy + r * 0.95], fill=255)
+            d.polygon(
+                [
+                    (cx - 1.85 * r, cy + r * 0.25), (cx + 1.85 * r, cy + r * 0.25), (cx, cy + r * 2.05),
+                ],
+                fill=255,
+            )
+        elif icon == "lock":
+            bw, bh = D * ss * 0.58, D * ss * 0.46
+            bx0, by0 = cx - bw / 2, cy - bh / 2 + D * ss * 0.10
+            d.rounded_rectangle([bx0, by0, bx0 + bw, by0 + bh], radius=D * ss * 0.08, fill=255)
+            sh_r = D * ss * 0.20
+            d.arc(
+                [cx - sh_r, by0 - 2 * sh_r + D * ss * 0.06, cx + sh_r, by0 + D * ss * 0.06],
+                start=180, end=360, fill=255, width=stroke,
+            )
+            dot = D * ss * 0.055
+            d.ellipse([cx - dot, cy + bh * 0.06 - dot, cx + dot, cy + bh * 0.06 + dot], fill=0)
         else:
             return None
         small = img.resize((D, D), Image.LANCZOS)

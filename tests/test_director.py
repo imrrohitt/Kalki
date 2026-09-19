@@ -63,6 +63,29 @@ def test_enforce_rules_keeps_decorations_rare():
     assert sum(1 for d in out if d.style == "oval") == 1
 
 
+def test_assign_styles_promotes_a_line_the_voice_gets_loud_on():
+    """The LLM never hears tone — a genuine vocal-loudness spike is treated as
+    real emphasis even when the text-only annotate pass called it neutral."""
+    import numpy as np
+
+    text = ["so", "anyway", "and", "then", "wait", "what", "happened", "next", "was", "wild"]
+    words = _words(" ".join(text), step=1.0)
+    drafts = [CaptionDraft(first=i, last=i, text=t) for i, t in enumerate(text)]
+    # Every line reads flat to the LLM — but "wait" earns an ordinary cream
+    # emphasis on its own merit, which is what makes the pop visible at all.
+    notes = [LineNote(weight=1) for _ in text]
+    notes[4] = LineNote(key="wait", weight=2)
+
+    times = np.arange(0, 12, 0.2, dtype=np.float32)
+    db = np.full_like(times, -32.0)
+    db[(times >= 4.0) & (times < 4.9)] += 14.0  # "wait" (span 4.0-4.9) is genuinely loud
+
+    out = assign_styles(drafts, notes, words, loud_times=times, loud_db=db)
+    loud_draft = next(d for d in out if d.text == "wait")
+    assert loud_draft.mood == "excited"
+    assert loud_draft.style != "plain"
+
+
 def test_assign_styles_builds_rhythm_from_notes():
     text = [
         "I recently switched",

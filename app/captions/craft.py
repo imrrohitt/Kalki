@@ -34,7 +34,7 @@ STYLE_MIN_GAP = {
     "quote": 12.0,
     "stack": 25.0,
     "serif": 4.5,
-    "chip": 16.0,
+    "chip": 11.0,
 }
 # Big cream moments never sit back to back.
 BIG_STYLES = {"serif", "quote", "oval", "tape", "stack", "chip"}
@@ -432,13 +432,22 @@ LINE_KINDS = ("payoff", "concept", "term", "drama", "quote", "normal")
 # these exist so a real surprise or a real high can move, not every line.
 MOODS = ("neutral", "surprise", "excited", "happy", "serious", "urgent")
 MOODS_THAT_POP = {"surprise", "excited"}
-# A small vocabulary of contextual badges. "none" is the right answer for
-# nearly every line; these are rare accents, not decoration.
-ICONS = ("none", "money", "growth", "idea", "video", "social", "check")
+# A vocabulary of contextual badges covering the ground a creator/business talk
+# actually covers. "none" is still the right answer for most lines — these are
+# accents, not decoration on every line.
+ICONS = (
+    "none", "money", "growth", "idea", "video", "social", "check",
+    "warning", "time", "target", "fire", "heart", "star", "lock", "question",
+)
 # Minimum seconds between two pops / two icon badges, independent of caption
 # style — these are motion and iconography, not the cream-word rarity above.
-POP_MIN_GAP = 9.0
-ICON_MIN_GAP = 16.0
+POP_MIN_GAP = 7.0
+ICON_MIN_GAP = 13.0
+# A line the speaker's own voice gets noticeably louder on — real prosodic
+# emphasis, not a text guess — is at least as strong a "highlight this" signal
+# as anything the LLM reads off the words alone.
+VOCAL_EMPHASIS_MIN_GAP = 5.0
+VOCAL_EMPHASIS_MAX_FRACTION = 0.18
 # The opening stretch that decides whether someone keeps watching. It gets
 # first claim on rare accents at a slightly lower bar than the rest of the
 # reel — a richer, more varied hook, never invented onto filler.
@@ -481,13 +490,23 @@ def _key_for(text: str, key: str) -> str:
 
 
 def assign_styles(
-    drafts: list[CaptionDraft], notes: list[LineNote], words: list[Word]
+    drafts: list[CaptionDraft],
+    notes: list[LineNote],
+    words: list[Word],
+    *,
+    loud_times=None,
+    loud_db=None,
 ) -> list[CaptionDraft]:
     """Turn line judgements into the reference look with a steady rhythm.
 
     Placed in priority order so the strongest moments win the spacing: the hook,
     then hand-drawn accents on weight-3 ideas, then serif payoffs, then cream serif
     words on meaningful lines. Everything else stays plain white sans.
+
+    `loud_times`/`loud_db` are the optional voice-loudness track from
+    `app.captions.acoustics` — the one signal here that comes from the actual
+    audio rather than the transcript. A line the speaker's own voice gets
+    genuinely louder on is treated as real emphasis alongside the LLM's mood.
     """
     if not drafts:
         return []
@@ -498,6 +517,19 @@ def assign_styles(
     styles = ["plain"] * n
     emphasis = [""] * n
     stacked: dict[int, int] = {}  # hook index -> absorbed next index
+
+    loud = [False] * n
+    if loud_times is not None and loud_db is not None and len(loud_times):
+        from app.captions.acoustics import flag_vocal_emphasis
+
+        spans = [(words[d.first].start, words[d.last].end) for d in drafts]
+        loud = flag_vocal_emphasis(
+            spans,
+            loud_times,
+            loud_db,
+            min_gap_s=VOCAL_EMPHASIS_MIN_GAP,
+            max_fraction=VOCAL_EMPHASIS_MAX_FRACTION,
+        )
 
     def clear(i: int, style: str) -> bool:
         gap = STYLE_MIN_GAP.get(style, 0.0)
@@ -534,10 +566,23 @@ def assign_styles(
     def free(i: int) -> bool:
         return styles[i] == "plain" and i not in stacked.values()
 
-    # 2. Premium colored chip on the line naming a concrete figure — money,
-    #    a percentage, a round number. A scroller remembers the number.
+    # 2. Premium colored chip: a concrete figure (money/percent/round number)
+    #    a scroller remembers, OR a line that is genuinely a highlight — the
+    #    LLM read real surprise/excitement in it, or the speaker's own voice
+    #    got noticeably louder right here. A specific figure always gets first
+    #    claim on the slot (pass 2a); emotional/vocal highlights only fill
+    #    slots a figure isn't using nearby (pass 2b) — a real dollar amount
+    #    should never lose its pill to an unrelated nearby highlight.
     for i in range(n):
-        if not free(i) or not MONEY_RE.search(texts[i]):
+        if free(i) and MONEY_RE.search(texts[i]):
+            if len(texts[i].split()) <= MAX_WORDS["chip"] and clear(i, "chip"):
+                styles[i] = "chip"
+    for i in range(n):
+        if not free(i):
+            continue
+        is_vocal_high = loud[i] and notes[i].weight >= 1
+        is_llm_high = notes[i].mood in MOODS_THAT_POP and notes[i].weight >= 2
+        if not (is_vocal_high or is_llm_high):
             continue
         if len(texts[i].split()) <= MAX_WORDS["chip"] and clear(i, "chip"):
             styles[i] = "chip"
@@ -659,18 +704,22 @@ def assign_styles(
 
     # 8. Mood: a real surprise or a real high gets a pop/"blink" reveal instead
     #    of the usual smooth rise — never on a plain connective line, never two
-    #    in quick succession, so the motion still reads as a highlight.
+    #    in quick succession, so the motion still reads as a highlight. A
+    #    genuine vocal-loudness spike counts too, even when the LLM's
+    #    text-only read of that line was neutral — the voice knows something
+    #    the transcript alone doesn't.
     mood = ["neutral"] * n
     last_pop = -99.0
     for i in order:
         note = notes[i]
+        wants_pop = note.mood in MOODS_THAT_POP or (loud[i] and note.weight >= 1)
         if (
-            note.mood in MOODS_THAT_POP
+            wants_pop
             and styles[i] != "plain"
             and i not in stacked
             and times[i] - last_pop >= POP_MIN_GAP
         ):
-            mood[i] = note.mood
+            mood[i] = note.mood if note.mood in MOODS_THAT_POP else "excited"
             last_pop = times[i]
 
     # 9. Icon: a small contextual badge on the rare line that is genuinely

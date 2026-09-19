@@ -25,7 +25,10 @@ CaptionTreatment = Literal[
 # icon is a small contextual badge. Both default to the quiet case — most
 # lines carry neither.
 CaptionMood = Literal["neutral", "surprise", "excited", "happy", "serious", "urgent"]
-CaptionIcon = Literal["none", "money", "growth", "idea", "video", "social", "check"]
+CaptionIcon = Literal[
+    "none", "money", "growth", "idea", "video", "social", "check",
+    "warning", "time", "target", "fire", "heart", "star", "lock", "question",
+]
 
 
 class CaptionWord(BaseModel):

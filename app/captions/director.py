@@ -162,24 +162,38 @@ For EVERY line:
     happy     warm, encouraging, a positive turn
     serious   a warning or a hard truth the viewer must take seriously
     urgent    time pressure, "right now" energy, a deadline
-  Be strict: `surprise` and `excited` are rare, maybe 1-3 lines in a whole reel — the ones
-  that would make YOU say "wait, what?" or genuinely light up reading them aloud. Do not
-  mark a line surprise/excited just because it has a number or an exclamation in the
-  transcript; judge the actual emotional weight of what is being said.
-- `icon`: "none" for nearly every line. Only name an icon when the line is unmistakably
-  ABOUT one of these, not just adjacent to the idea:
-    money   a specific amount, price, or earnings figure
-    growth  scaling, results, a metric going up
-    idea    the single key insight or "aha" of the video
-    video   making/posting video content, YouTube, Reels, a platform for content
-    social  DMs, comments, outreach, LinkedIn/Twitter/Instagram engagement
-    check   a completed step, a proof point, a "that's it" confirmation
-  Icons are rare accents (a handful per video at most) — "none" is almost always right.
+  Word-level highlighting and mood-driven motion are what make a caption edit feel alive
+  instead of a static subtitle track — viewers track the movement. Use `surprise` and
+  `excited` generously wherever the delivery genuinely earns it: roughly one line in every
+  8-10 across the reel, not once or twice in the whole video. Every beat of a talk has SOME
+  texture — a mild "huh" moment, a small win, a turn — don't reserve these for only the
+  single biggest moment; a flat reel of all-neutral lines is the failure mode, not overuse.
+  Still judge honestly: don't mark a line surprise/excited just because it has a number or
+  an exclamation mark in the transcript, and never two in a row on the same small beat.
+- `icon`: name one whenever a line is genuinely about it — these should show up
+  regularly, not just once or twice:
+    money    a specific amount, price, or earnings figure
+    growth   scaling, results, a metric going up, momentum building
+    idea     a key insight, a realization, an "aha", a tip worth remembering
+    video    making/posting video content, YouTube, Reels, a content platform
+    social   DMs, comments, outreach, LinkedIn/Twitter/Instagram engagement
+    check    a completed step, a proof point, a "that's it" confirmation, a done task
+    warning  a mistake, a risk, a red flag, "don't do this"
+    time     a deadline, a duration ("in 2 minutes"), urgency around time
+    target   a goal, an objective, aiming for something specific
+    fire     something trending, viral, hyped, blowing up
+    heart    something personal, emotional, heartfelt, about relationships or people
+    star     quality, being the best, premium, a rating or achievement
+    lock     privacy, security, confidentiality, keeping something secret
+    question a doubt, a rhetorical question, genuine uncertainty
+  Aim for roughly one icon every 6-10 lines where the topic genuinely fits one of these —
+  "none" is still right when a line truly isn't about any of them, but don't default to
+  "none" out of caution; a caption edit with icons scattered through it reads as designed,
+  one with none at all reads as unfinished.
 
-Be a strict editor: most lines are weight 0-1, mood neutral, icon none. The opening line
-with real content, and the brief's key_ideas at the moment they are said, deserve weight
-2-3 — but that does not automatically mean surprise/excited/an icon; judge each signal
-on its own.
+Judge generously but honestly: weight, mood, and icon should each reflect what the line
+actually is. The goal is a caption track that feels hand-edited by someone who was paying
+close attention to the whole talk — varied, textured, never flat, never random.
 """
 
 
@@ -378,15 +392,26 @@ def annotation_problems(data: dict[str, Any], lines: list[str]) -> list[str]:
         problems.append(f"{heavy} lines have weight 3; keep weight 3 for about one line in eight")
 
     popped = sum(1 for item in seen.values() if str(item.get("mood") or "neutral") in {"surprise", "excited"})
-    if popped > max(3, len(lines) // 12):
+    if popped > max(4, len(lines) // 5):
         problems.append(
-            f"{popped} lines are marked surprise/excited; keep it to about one in twelve at most — "
-            "most lines are neutral"
+            f"{popped} lines are marked surprise/excited; that is too many to land as highlights — "
+            "keep it to roughly one in every 8-10 lines"
+        )
+    elif len(lines) >= 15 and popped == 0:
+        problems.append(
+            "every single line is mood=neutral; a real talk has SOME texture — find the lines with "
+            "genuine surprise, a small win, or a turn and mark them surprise/excited (roughly one in 8-10)"
         )
     iconed = sum(1 for item in seen.values() if str(item.get("icon") or "none") != "none")
-    if iconed > max(4, len(lines) // 10):
+    if iconed > max(6, len(lines) // 4):
         problems.append(
-            f"{iconed} lines have an icon; icons are rare accents — keep it to about one in ten at most"
+            f"{iconed} lines have an icon; that reads as clutter — keep it to roughly one in every 6-10 lines"
+        )
+    elif len(lines) >= 15 and iconed == 0:
+        problems.append(
+            "every single line has icon=none; look again for lines genuinely about money, growth, an "
+            "idea, video/social platforms, a warning, time, a goal, hype, something personal, quality, "
+            "privacy, or a doubt, and give roughly one in every 6-10 lines a matching icon"
         )
     return problems[:15]
 
@@ -638,12 +663,26 @@ class CaptionDirector:
         video_duration: float,
         job_id: str = "director",
         reference_text: str = "",
+        audio_path: str | None = None,
     ) -> DirectorResult:
+        """`audio_path` (16kHz mono PCM wav) is optional but recommended: it is
+        the one signal in this whole pipeline read from the actual voice
+        rather than the transcript — a real loudness spike becomes a "blink"
+        pop or a colored highlight even on a line the text alone reads flat.
+        """
         jid = job_id[:8]
         words, seg_ranges = segment_words(transcript)
         if not words:
             raise RuntimeError("No timed words in transcript")
         metrics: dict[str, Any] = {}
+
+        loud_times = loud_db = None
+        if audio_path:
+            from app.captions.acoustics import try_voice_loudness_track
+
+            loud_times, loud_db = try_voice_loudness_track(audio_path)
+            if loud_times is not None:
+                logger.info("[%s] voice loudness track: %s samples", jid, len(loud_times))
 
         t0 = time.perf_counter()
         brief = await self.brief(transcript, reference_text=reference_text)
@@ -694,7 +733,7 @@ class CaptionDirector:
         except Exception as exc:  # noqa: BLE001 - craft still designs from heuristics
             logger.warning("[%s] director annotate failed, heuristic weights: %s", jid, exc)
             line_notes = [LineNote() for _ in drafts]
-        drafts = assign_styles(drafts, line_notes, words)
+        drafts = assign_styles(drafts, line_notes, words, loud_times=loud_times, loud_db=loud_db)
         metrics["design_ms"] = int((time.perf_counter() - t3) * 1000)
 
         drafts = enforce_design_rules(drafts, words)
