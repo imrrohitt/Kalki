@@ -201,6 +201,27 @@ def synthesize_shimmer(path: Path) -> Path:
     return path
 
 
+def synthesize_pop(path: Path) -> Path:
+    """A soft rounded 'bloop' for the premium CTA bubble — a bubble popping
+    into place, not a hard notification ding."""
+    if path.exists():
+        return path
+    n = int(0.42 * SR)
+    t = np.arange(n, dtype=np.float32) / SR
+    # Quick upward pitch bend, like a bubble stretching then releasing.
+    f0, f1 = 340.0, 780.0
+    freq = f0 + (f1 - f0) * (1 - np.exp(-t / 0.045))
+    phase = 2 * np.pi * np.cumsum(freq) / SR
+    env = np.exp(-t / 0.09) * (1 - np.exp(-t / 0.002))
+    tone = (np.sin(phase) + 0.22 * np.sin(2 * phase)) * env
+    out = np.zeros((n, 2), np.float32)
+    out[:, 0] = tone * 0.92
+    out[:, 1] = tone * 0.92
+    out *= 0.8 / (float(np.max(np.abs(out))) or 1.0)
+    _write_wav(path, out)
+    return path
+
+
 def pick_music_track(mood_name: str) -> Path | None:
     folder = settings.resolve_path(settings.music_dir)
     if not folder.is_dir():
@@ -228,13 +249,13 @@ def plan_accents(timeline: CaptionTimeline, *, video_duration: float) -> list[Sf
         hits.append(SfxHit(at=max(0.0, first.start), kind="riser", gain=0.14, reason="hook"))
     last_at = -99.0
     for cap in caps[1:]:
-        if cap.treatment not in {"oval", "underline", "tape"}:
+        if cap.treatment not in {"oval", "underline", "tape", "bubble"}:
             continue
-        at = cap.start + (0.30 if cap.treatment == "oval" else 0.2)
+        at = cap.start + (0.30 if cap.treatment in {"oval", "bubble"} else 0.2)
         if at - last_at < 12.0 or at > video_duration - 0.5:
             continue
-        kind = "swoosh" if cap.treatment == "tape" else "shimmer"
-        gain = {"oval": 0.13, "underline": 0.09, "tape": 0.10}[cap.treatment]
+        kind = "swoosh" if cap.treatment == "tape" else "pop" if cap.treatment == "bubble" else "shimmer"
+        gain = {"oval": 0.13, "underline": 0.09, "tape": 0.10, "bubble": 0.16}[cap.treatment]
         hits.append(SfxHit(at=round(at, 3), kind=kind, gain=gain, reason=cap.treatment))
         last_at = at
     return hits[:10]
@@ -287,6 +308,9 @@ def build_soundtrack(
         if hit.kind == "shimmer":
             path = synthesize_shimmer(cache_dir / "shimmer.wav")
             trim = 1.5
+        elif hit.kind == "pop":
+            path = synthesize_pop(cache_dir / "pop.wav")
+            trim = 0.42
         else:
             found = resolve_clip(hit.kind)
             if found is None:

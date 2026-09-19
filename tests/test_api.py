@@ -330,6 +330,55 @@ def test_videos_query_params_theme_and_split_screen(tmp_path, monkeypatch):
         assert bad.status_code == 400
 
 
+def test_videos_query_param_caption_style(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
+    from app.config import Settings
+
+    test_settings = Settings(storage_dir=str(tmp_path / "storage"))
+    monkeypatch.setattr("app.config.settings", test_settings)
+    monkeypatch.setattr("app.api.routes.settings", test_settings)
+    routes._pipeline = MagicMock()
+    routes._pipeline.run = AsyncMock()
+    app = create_app()
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not-a-real-video")
+
+    with TestClient(app) as client:
+        with video.open("rb") as f:
+            default = client.post(
+                "/api/v1/videos",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert default.status_code == 200
+        body = default.json()
+        assert body["caption_style"] == "classic"
+        job = job_store.get(body["job_id"])
+        assert job is not None
+        assert job.caption_style == "classic"
+
+        with video.open("rb") as f:
+            premium = client.post(
+                "/api/v1/videos?caption_style=premium",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert premium.status_code == 200
+        body = premium.json()
+        assert body["caption_style"] == "premium"
+        job = job_store.get(body["job_id"])
+        assert job is not None
+        assert job.caption_style == "premium"
+
+        status = client.get(f"/api/v1/jobs/{body['job_id']}").json()
+        assert status["caption_style"] == "premium"
+
+        with video.open("rb") as f:
+            bad = client.post(
+                "/api/v1/videos?caption_style=bogus",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert bad.status_code == 400
+
+
 def test_videos_accepts_markdown_transcript_and_skips_whisper(tmp_path, monkeypatch):
     monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
     from app.config import Settings

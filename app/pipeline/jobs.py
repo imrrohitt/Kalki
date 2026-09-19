@@ -50,6 +50,11 @@ class Job:
     kind: str = "video"
     theme: str = ""
     split_layout: bool = False
+    # Full-frame talking-head reels only. "classic" is the existing caption
+    # director look, unchanged. "premium" adds a black CTA bubble, an
+    # occasional hand-marker font line, and — framing permitting — an
+    # occasional chest-area placement, on top of the same AI-judged captions.
+    caption_style: str = "classic"
     status: JobStatus = JobStatus.uploaded
     stage: str = JobStatus.uploaded.value
     progress: int = 5
@@ -100,6 +105,7 @@ class Job:
             "editorial_path": self.editorial_path,
             "edit_plan_path": self.edit_plan_path,
             "skip_stt": self.skip_stt,
+            "caption_style": self.caption_style,
             "metrics": self.metrics,
         }
 
@@ -122,6 +128,7 @@ class Job:
             editorial_path=data.get("editorial_path"),
             edit_plan_path=data.get("edit_plan_path"),
             skip_stt=bool(data.get("skip_stt", False)),
+            caption_style=data.get("caption_style", "classic"),
             metrics=dict(data.get("metrics") or {}),
         )
 

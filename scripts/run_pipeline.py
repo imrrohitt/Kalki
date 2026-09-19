@@ -3,10 +3,11 @@
 Full-frame (default): transcribe -> caption director -> premium captions + soundtrack.
 Split: transcribe -> editorial -> captions -> graphics -> render.
 
-Usage: python scripts/run_pipeline.py <source_video> [out_dir] [theme] [split] [reference.md]
+Usage: python scripts/run_pipeline.py <source_video> [out_dir] [theme] [split] [reference.md] [caption_style]
 Themes: paper (default) | noir | tech | ivory  (split layout only)
 split: false (default) | true
 reference.md: optional creator transcript/translation used as ground truth for meaning
+caption_style: classic (default) | premium  (full-frame only)
 """
 
 from __future__ import annotations
@@ -72,8 +73,13 @@ async def main() -> None:
     duration = min(info.duration, transcript.duration or info.duration)
     if not split_layout:
         reference = Path(sys.argv[5]).read_text(encoding="utf-8") if len(sys.argv) > 5 else ""
+        caption_style = sys.argv[6] if len(sys.argv) > 6 else "classic"
         result = await CaptionDirector().direct(
-            transcript, video_duration=info.duration, job_id="local", reference_text=reference
+            transcript,
+            video_duration=info.duration,
+            job_id="local",
+            reference_text=reference,
+            caption_style=caption_style,
         )
         (out_dir / "brief.json").write_text(
             json.dumps(result.brief.as_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
@@ -94,6 +100,7 @@ async def main() -> None:
             accents=accents,
             music_mood=result.brief.music_mood,
             video_duration=info.duration,
+            caption_style=caption_style,
         )
         log.info("rendered in %.1fs", time.perf_counter() - t_render)
         audio.unlink(missing_ok=True)

@@ -262,6 +262,7 @@ class FFmpegRenderer:
         accents: list[SfxHit] | None = None,
         music_mood: str = "warm_inspiring",
         video_duration: float = 0.0,
+        caption_style: str = "classic",
     ) -> str:
         """Full-frame talking head with the premium caption layer and soundtrack."""
         import tempfile
@@ -286,7 +287,12 @@ class FFmpegRenderer:
         fps = max(fps, 24)
         head_top = detect_head_top(source_video, width=out_w, height=out_h)
         layer = CaptionLayer(
-            caption_timeline, width=out_w, height=out_h, fps=fps, head_top=head_top
+            caption_timeline,
+            width=out_w,
+            height=out_h,
+            fps=fps,
+            head_top=head_top,
+            caption_style=caption_style,
         )
         # Real per-moment background intelligence: one cheap low-res decode of
         # the whole reel gives every caption its own bright/dark read, instead
@@ -307,6 +313,7 @@ class FFmpegRenderer:
             head_top=head_top,
             bg_luma_times=luma_times,
             bg_luma_values=luma_values,
+            caption_style=caption_style,
         )
         n_frames = int(math.ceil(duration * fps))
 

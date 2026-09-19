@@ -17,7 +17,7 @@ from app.asr import stabilize_copy
 from app.captions.models import Caption, CaptionTimeline, CaptionWord
 from app.transcription.models import Word
 
-STYLE_NAMES = ("plain", "mix", "serif", "stack", "quote", "oval", "underline", "tape", "chip")
+STYLE_NAMES = ("plain", "mix", "serif", "stack", "quote", "oval", "underline", "tape", "chip", "bubble")
 MUSIC_MOODS = (
     "warm_inspiring",
     "focused_tech",
@@ -35,9 +35,10 @@ STYLE_MIN_GAP = {
     "stack": 25.0,
     "serif": 4.5,
     "chip": 11.0,
+    "bubble": 18.0,
 }
 # Big cream moments never sit back to back.
-BIG_STYLES = {"serif", "quote", "oval", "tape", "stack", "chip"}
+BIG_STYLES = {"serif", "quote", "oval", "tape", "stack", "chip", "bubble"}
 BIG_MIN_GAP = 2.4
 MAX_WORDS = {
     "plain": 5,
@@ -49,6 +50,7 @@ MAX_WORDS = {
     "underline": 4,
     "tape": 3,
     "chip": 4,
+    "bubble": 4,
 }
 MAX_CAPTION_SECONDS = 3.4
 
@@ -93,6 +95,7 @@ class CaptionDraft:
     # vast majority of lines.
     mood: str = "neutral"
     icon: str = "none"
+    cta: bool = False
 
     @property
     def tokens(self) -> list[str]:
@@ -179,7 +182,7 @@ def _downgrade(d: CaptionDraft) -> CaptionDraft:
     if d.style == "oval":
         style = "serif" if len(d.tokens) <= MAX_WORDS["serif"] else "mix"
         return replace(d, style=style)
-    if d.style in {"tape", "quote", "chip"}:
+    if d.style in {"tape", "quote", "chip", "bubble"}:
         return replace(d, style="serif")
     if d.style == "stack":
         merged = f"{d.text} {d.sub}".strip()
@@ -243,6 +246,7 @@ def _split_long(d: CaptionDraft, words: list[Word]) -> list[CaptionDraft]:
             # as a glitch, not a highlight.
             mood=d.mood if carry else "neutral",
             icon=d.icon if carry else "none",
+            cta=d.cta if carry else False,
         )
 
     if d.style in BIG_STYLES:
@@ -302,7 +306,7 @@ def enforce_design_rules(drafts: list[CaptionDraft], words: list[Word]) -> list[
         cleaned.append(
             CaptionDraft(
                 first=d.first, last=d.last, text=text, sub=sub, style=style, emphasis=emphasis,
-                mood=d.mood, icon=d.icon,
+                mood=d.mood, icon=d.icon, cta=d.cta,
             )
         )
 
@@ -417,6 +421,7 @@ def _merge_flashes(drafts: list[CaptionDraft], words: list[Word], floor: float =
                     emphasis=emphasis,
                     mood=keep.mood,
                     icon=keep.icon,
+                    cta=keep.cta,
                 )
             ]
             merged = True
@@ -457,7 +462,7 @@ HOOK_WINDOW_SECONDS = 30.0
 @dataclass(frozen=True)
 class LineNote:
     """The director's judgement of one line: what it says, what it means, and
-    the two context signals — mood and icon — that the annotate prompt reads
+    the context signals — mood, icon, cta — that the annotate prompt reads
     straight off the speaker's words and delivery."""
 
     key: str = ""
@@ -465,6 +470,7 @@ class LineNote:
     kind: str = "normal"
     mood: str = "neutral"
     icon: str = "none"
+    cta: bool = False
 
 
 def _strip_greeting(text: str) -> str:
@@ -496,6 +502,7 @@ def assign_styles(
     *,
     loud_times=None,
     loud_db=None,
+    caption_style: str = "classic",
 ) -> list[CaptionDraft]:
     """Turn line judgements into the reference look with a steady rhythm.
 
@@ -586,6 +593,17 @@ def assign_styles(
             continue
         if len(texts[i].split()) <= MAX_WORDS["chip"] and clear(i, "chip"):
             styles[i] = "chip"
+
+    # 2.5. Premium theme only: a black CTA bubble on the rare line that is
+    #      genuinely asking the viewer to do something right now — follow,
+    #      subscribe, comment, share. Judged by the LLM (LineNote.cta), same
+    #      pattern as mood/icon; never fires in the classic style.
+    if caption_style == "premium":
+        for i in range(n):
+            if not free(i) or not notes[i].cta:
+                continue
+            if len(texts[i].split()) <= MAX_WORDS["bubble"] and clear(i, "bubble"):
+                styles[i] = "bubble"
 
     # 3. Hand-drawn accents on the key ideas.
     accent_for = {"concept": "oval", "term": "underline", "drama": "tape", "quote": "quote"}
@@ -765,14 +783,14 @@ def assign_styles(
             out.append(
                 replace(
                     d, text=texts[i], sub=nxt.text, last=nxt.last, style="stack", emphasis="",
-                    mood=mood[i], icon=icon[i],
+                    mood=mood[i], icon=icon[i], cta=notes[i].cta,
                 )
             )
             continue
         out.append(
             replace(
                 d, text=texts[i], style=styles[i], emphasis=emphasis[i],
-                mood=mood[i], icon=icon[i],
+                mood=mood[i], icon=icon[i], cta=notes[i].cta,
             )
         )
     return out
@@ -996,6 +1014,7 @@ def drafts_to_timeline(
                 words=cap_words,
                 mood=d.mood,
                 icon=d.icon,
+                cta=d.cta,
             )
         )
     return CaptionTimeline(captions=captions)

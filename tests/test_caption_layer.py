@@ -72,6 +72,21 @@ def test_accents_are_sparse_and_never_per_word():
     assert len(hits) == 2  # hook + one sparkle; the underline is too close to the oval
 
 
+def test_bubble_treatment_gets_its_own_pop_cue():
+    """The premium CTA bubble needs a distinct sound, not the oval/underline
+    shimmer — a bubble popping into place, not a hand-drawn flourish."""
+    timeline = CaptionTimeline(
+        captions=[
+            _cap(0.0, 1.0, "hook line", "plain"),
+            _cap(15.0, 17.0, "follow for more", "bubble"),
+        ]
+    )
+    hits = plan_accents(timeline, video_duration=20.0)
+    pops = [h for h in hits if h.kind == "pop"]
+    assert len(pops) == 1
+    assert pops[0].reason == "bubble"
+
+
 def test_pop_mood_uses_frames_reveal_not_rise():
     """A surprise/excited caption 'blinks' in (scale-bounce) instead of rising."""
     plain = CaptionTimeline(captions=[_cap(0.0, 1.5, "an ordinary line", "plain")])
@@ -161,6 +176,70 @@ def _dominant_color(layer: CaptionLayer, cap: Caption, *, hairline: bool = False
     assert len(ys) > 0
     pixels = band[ys, xs, :3].astype(np.float64)
     return tuple(int(round(v)) for v in pixels.mean(axis=0))
+
+
+def test_classic_style_never_uses_premium_variety():
+    """The default style must render byte-identical to before this feature —
+    no bubble, no marker font, no chest placement unless explicitly asked."""
+    caps = [_cap(i * 4.0, i * 4.0 + 3.0, "follow me now", "plain") for i in range(5)]
+    tl = CaptionTimeline(captions=caps)
+    layer = CaptionLayer(tl, width=1080, height=1920, head_top=int(1920 * 0.22))
+    assert layer.baseline_chest is None
+    assert all(c.screen_area == "head" and c.font_variant == "default" for c in layer.captions)
+
+
+def test_premium_style_rotates_marker_font_and_chest_with_spacing():
+    caps = [_cap(i * 4.0, i * 4.0 + 3.0, f"caption number {i}", "plain") for i in range(8)]
+    tl = CaptionTimeline(captions=caps)
+    layer = CaptionLayer(
+        tl, width=1080, height=1920, head_top=int(1920 * 0.22), caption_style="premium"
+    )
+    assert layer.baseline_chest is not None
+    # The hook (first caption) is never touched.
+    assert layer.captions[0].screen_area == "head"
+    assert layer.captions[0].font_variant == "default"
+    markers = [c.start for c in layer.captions if c.font_variant == "marker"]
+    chests = [c.start for c in layer.captions if c.screen_area == "chest"]
+    assert markers or chests  # some variety actually happened over 8 spaced captions
+    for a, b in zip(markers, markers[1:]):
+        assert b - a >= 15.0
+    for a, b in zip(chests, chests[1:]):
+        assert b - a >= 9.0
+    # A line never gets both accents at once.
+    assert not any(c.font_variant == "marker" and c.screen_area == "chest" for c in layer.captions)
+
+
+def test_premium_style_disables_chest_when_framing_is_a_tight_closeup():
+    caps = [_cap(i * 4.0, i * 4.0 + 3.0, "hi there", "plain") for i in range(5)]
+    tl = CaptionTimeline(captions=caps)
+    layer = CaptionLayer(
+        tl, width=1080, height=1920, head_top=int(1920 * 0.55), caption_style="premium"
+    )
+    assert layer.baseline_chest is None
+    assert all(c.screen_area == "head" for c in layer.captions)
+
+
+def test_bubble_treatment_renders_a_distinct_dark_badge():
+    timeline = CaptionTimeline(captions=[_cap(0.0, 2.0, "follow for more", "bubble")])
+    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640)
+    band = layer.frame_rgba(1.5)
+    assert band[..., 3].max() > 200
+    # The pill fill is near-black — distinct from every chip color.
+    ys, xs = np.nonzero(band[..., 3] > 250)
+    assert len(ys) > 0
+    corner = band[ys.min() + 3, xs[np.argmin(np.abs(xs - xs.min()))], :3]
+    assert corner.max() < 60
+
+
+def test_marker_font_variant_changes_the_rendered_glyphs():
+    plain = CaptionTimeline(captions=[_cap(0.0, 2.0, "wow okay", "plain")])
+    marker_cap = _cap(0.0, 2.0, "wow okay", "plain")
+    marker_cap.font_variant = "marker"
+    marker = CaptionTimeline(captions=[marker_cap])
+    band_plain = CaptionLayer(plain, width=1080, height=1920, head_top=640).frame_rgba(1.7)
+    band_marker = CaptionLayer(marker, width=1080, height=1920, head_top=640).frame_rgba(1.7)
+    # Different font at a different size draws a meaningfully different shape.
+    assert band_plain[..., 3].sum() != band_marker[..., 3].sum()
 
 
 def test_soundtrack_graph_ducks_music_under_voice(tmp_path: Path):

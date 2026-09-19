@@ -55,6 +55,16 @@ BRIGHT_LUMA_THRESHOLD = 150.0
 CHIP_COLORS = [(22, 34, 49), (140, 72, 40), (33, 58, 47)]  # ink-navy, terracotta, forest
 CHIP_TEXT = (255, 250, 236)
 CHIP_SPARK = (255, 250, 232)
+# The premium theme's "subscribe button" moment — a near-black badge with a
+# thin cream outline and a star, for the rare line that is a direct ask of
+# the viewer (follow/subscribe/comment). Deliberately distinct from the chip
+# pill so it reads as a call-to-action, not another stat callout.
+BUBBLE_FILL = (15, 15, 17)
+BUBBLE_OUTLINE = (232, 224, 200)
+BUBBLE_TEXT = (250, 247, 238)
+# A genuine hand-marker accent for the premium theme — a real script font,
+# not a filter effect, used sparingly for a casual, personal-note beat.
+MARKER_FONT = str(FONT_DIR / "PermanentMarker-Regular.ttf")
 
 # Font sizes in px on a 1080-wide frame.
 FS_SANS = 58
@@ -65,6 +75,10 @@ FS_HOOK = 104
 FS_SUB = 56
 FS_TAPE = 94
 FS_CHIP = 64
+FS_BUBBLE = 62
+# Script/marker fonts run visually smaller than a sans/serif at the same
+# point size — sized up so the "handwritten" line reads at equal weight.
+FS_MARKER = 96
 MAX_LINE_FRAC = 0.84
 
 WORD_IN = 0.16
@@ -294,11 +308,13 @@ class CaptionLayer:
         bright_background: bool = False,
         bg_luma_times: list[float] | None = None,
         bg_luma_values: list[float] | None = None,
+        caption_style: str = "classic",
     ) -> None:
         self.width = width
         self.height = height
         self.fps = fps
         self.u = width / 1080.0
+        self.caption_style = caption_style
         # Fallback for when no per-time track is available (tests, or a
         # detection failure): one flat guess for the whole reel, same as
         # before. When the track is present each caption judges its own
@@ -316,11 +332,67 @@ class CaptionLayer:
         baseline = max(baseline, int(250 * u))
         top = max(0, baseline - int(250 * u))
         bottom = min(height, baseline + int(190 * u))
-        self.band_top = top - (top % 2)
+
+        # Premium theme only: an occasional line sits below the face — on the
+        # chest/upper-torso area — instead of always above the head, so a
+        # talking-head reel doesn't read from the exact same spot every beat.
+        # Only when the framing actually shows that much of the speaker (a
+        # tight face-filling close-up has nowhere to put it), and only ever a
+        # heuristic offset below the hairline — there is no chin/chest
+        # detector, so this is deliberately conservative.
+        self.baseline_chest: int | None = None
+        chest_enabled = False
+        if caption_style == "premium" and head < height * 0.46:
+            chest_y = int(head + 460 * u)
+            if chest_y + int(170 * u) < height * 0.94:
+                chest_enabled = True
+                top = min(top, chest_y - int(120 * u))
+                bottom = max(bottom, chest_y + int(150 * u))
+
+        self.band_top = max(0, top - (top % 2))
         self.band_height = (bottom - self.band_top) + ((bottom - self.band_top) % 2)
         self.baseline = baseline - self.band_top
+        if chest_enabled:
+            self.baseline_chest = int(head + 460 * u) - self.band_top
         self._cache: dict[int, list[Element]] = {}
         self._uid = 0
+        self._plan_premium_variety(chest_enabled)
+
+    def _plan_premium_variety(self, chest_enabled: bool) -> None:
+        """Deterministic, timing-based variety for the premium theme — never
+        an LLM call, since these are purely spatial/typographic rotations the
+        renderer alone has the geometry to decide (font rotation, and whether
+        this video's own framing shows a chest area at all). Sets
+        `font_variant`/`screen_area` directly on the sorted Caption objects,
+        which `_tokens`/`_layout` already read. Rare and spaced out, same
+        restraint as every other accent in this file. A no-op entirely in the
+        classic style."""
+        if self.caption_style != "premium" or not self.captions:
+            return
+        MARKER_MIN_GAP = 15.0
+        CHEST_MIN_GAP = 9.0
+        RESTYLABLE = {"plain", "mix", "serif"}
+        last_marker = -1e9
+        last_chest = -1e9
+        for i, cap in enumerate(self.captions):
+            if i == 0:
+                continue  # keep the hook consistent
+            t = cap.start
+            words = len((cap.text or "").split())
+            # A hand-marker beat: a short, undecorated line, well after the
+            # last one — a casual aside, not competing with an oval/chip/tape
+            # moment that already has its own distinct look.
+            if (
+                cap.treatment in RESTYLABLE
+                and 1 <= words <= 4
+                and t - last_marker >= MARKER_MIN_GAP
+            ):
+                cap.font_variant = "marker"
+                last_marker = t
+                continue  # one accent per line — don't also send it to the chest
+            if chest_enabled and t - last_chest >= CHEST_MIN_GAP:
+                cap.screen_area = "chest"
+                last_chest = t
 
     # ------------------------------------------------------------ public api
     def iter_frames(self, n_frames: int) -> Iterator[bytes]:
@@ -464,10 +536,16 @@ class CaptionLayer:
             line: list[_Token] = []
             for word in words[k : k + count]:
                 text = word.text
-                if treatment == "tape":
+                if getattr(cap, "font_variant", "default") == "marker" and treatment in {"plain", "mix", "serif"}:
+                    # The premium theme's hand-marker beat overrides the usual
+                    # font for this whole line — a casual, personal-note look.
+                    tok = _Token(word, text, MARKER_FONT, FS_MARKER, accent_color)
+                elif treatment == "tape":
                     tok = _Token(word, text, SERIF_FONT, FS_TAPE, TAPE_INK, shadow=False)
                 elif treatment == "chip":
                     tok = _Token(word, text, SANS_FONT, FS_CHIP, CHIP_TEXT, shadow=False)
+                elif treatment == "bubble":
+                    tok = _Token(word, text, SANS_FONT, FS_BUBBLE, BUBBLE_TEXT, shadow=False)
                 elif treatment == "stack":
                     if li == 0:
                         tok = _Token(word, text, SERIF_FONT, FS_HOOK, accent_color)
@@ -529,10 +607,11 @@ class CaptionLayer:
         palette = self._palette_for(bright)
         lines = self._tokens(cap, index, palette)
         max_w = self.width * MAX_LINE_FRAC
-        if treatment in {"tape", "chip"}:
+        if treatment in {"tape", "chip", "bubble"}:
             max_w -= 2 * 64 * u
         elements: list[Element] = []
-        baseline = float(self.baseline)
+        use_chest = cap.screen_area == "chest" and self.baseline_chest is not None
+        baseline = float(self.baseline_chest if use_chest else self.baseline)
         line_meta: list[tuple[float, float, float, float, float]] = []  # x0, x1, ink_top, ink_bottom, size
         prev_size = 0.0
         for li, tokens in enumerate(lines):
@@ -548,7 +627,7 @@ class CaptionLayer:
                 baseline += 1.10 * size + 0.55 * prev_size
             prev_size = size
             x_left = (self.width - width) / 2.0
-            whole_line = treatment in SERIF_LINE_STYLES or treatment in {"tape", "chip"} or (
+            whole_line = treatment in SERIF_LINE_STYLES or treatment in {"tape", "chip", "bubble"} or (
                 treatment == "stack" and li == 0
             )
             # A pop applies to the whole phrase when it reveals as one unit
@@ -558,7 +637,7 @@ class CaptionLayer:
             pop_line = cap.mood in {"surprise", "excited"}
             for k, (tok, sp, dx) in enumerate(zip(tokens, sprites, xs)):
                 if whole_line:
-                    t_in = cap.start + 0.05 * k + (0.14 if treatment in {"tape", "chip"} else 0.0)
+                    t_in = cap.start + 0.05 * k + (0.14 if treatment in {"tape", "chip", "bubble"} else 0.0)
                     dur, rise = LINE_IN, 16 * u
                 else:
                     t_in = max(cap.start, tok.word.start)
@@ -607,6 +686,8 @@ class CaptionLayer:
             elements[:0] = self._tape(cap, first, index)
         elif treatment == "chip":
             elements[:0] = self._chip(cap, first, index)
+        elif treatment == "bubble":
+            elements[:0] = self._bubble(cap, first)
         if cap.icon and cap.icon != "none":
             elements[:0] = self._icon_badge(cap, first, cap.icon)
         return elements
@@ -902,6 +983,67 @@ class CaptionLayer:
         els.append(
             self._element(
                 t_in=cap.start + 0.16, dur=0.24, t_out=cap.end, mode="frames",
+                frames=pops, x=int(sx), y=int(sy),
+            )
+        )
+        return els
+
+    def _bubble(self, cap: Caption, meta) -> list[Element]:
+        """The premium theme's CTA badge: a near-black rounded pill with a
+        thin cream outline and a star — a direct ask of the viewer, styled
+        like a subscribe/follow prompt rather than a stat callout."""
+        u = self.u
+        x0, x1, top, bottom, size = meta
+        pad_x = int(40 * u)
+        pad_y = int(24 * u)
+        w = int((x1 - x0) + 2 * pad_x)
+        h = int((bottom - top) + 2 * pad_y)
+        cx = (x0 + x1) / 2
+        cy = (top + bottom) / 2
+        radius = int(h * 0.44)
+        ss = 3
+        pad = int(18 * u)
+        W = w + 2 * pad
+        H = h + 2 * pad
+        stroke = max(2, int(2.6 * u))
+        fill_mask = Image.new("L", (W * ss, H * ss), 0)
+        ImageDraw.Draw(fill_mask).rounded_rectangle(
+            [pad * ss, pad * ss, (W - pad) * ss, (H - pad) * ss], radius=radius * ss, fill=255,
+        )
+        line_mask = Image.new("L", (W * ss, H * ss), 0)
+        ImageDraw.Draw(line_mask).rounded_rectangle(
+            [pad * ss, pad * ss, (W - pad) * ss, (H - pad) * ss],
+            radius=radius * ss, outline=255, width=stroke * ss,
+        )
+        fill_small = fill_mask.resize((W, H), Image.LANCZOS)
+        line_small = line_mask.resize((W, H), Image.LANCZOS)
+        fm = np.asarray(fill_small, np.float32) / 255.0
+        lm = np.asarray(line_small, np.float32) / 255.0
+        shade = np.asarray(fill_small.filter(ImageFilter.GaussianBlur(11 * u)), np.float32) / 255.0
+        shade = np.roll(shade, max(1, int(6 * u)), axis=0)
+        arr = np.zeros((H, W, 4), np.float32)
+        fill_col = np.array(BUBBLE_FILL, np.float32) / 255.0
+        line_col = np.array(BUBBLE_OUTLINE, np.float32) / 255.0
+        arr[..., :3] = fill_col[None, None, :] * fm[..., None]
+        arr[..., 3] = fm + (shade * 0.34 * self.shadow) * (1.0 - fm)
+        # Outline drawn over the fill, premultiplied-over.
+        a = lm[..., None]
+        arr[..., :3] = line_col[None, None, :] * a + arr[..., :3] * (1.0 - a)
+        arr[..., 3:4] = np.maximum(arr[..., 3:4], a)
+
+        els = [
+            self._element(
+                t_in=cap.start, dur=0.24, t_out=cap.end, mode="wipe",
+                arr=arr, x=int(cx - W / 2), y=int(cy - H / 2),
+            )
+        ]
+        star = _star5(max(7, int(15 * u)), BUBBLE_OUTLINE)
+        pops = [_scaled(star, s) for s in (0.2, 0.6, 1.05, 0.85, 1.0)]
+        sx = cx - w / 2 + pad_x * 0.30
+        sy = cy - h / 2 + pad_y * 0.30
+        els.append(
+            self._element(
+                t_in=cap.start + 0.18, dur=0.26, t_out=cap.end, mode="frames",
                 frames=pops, x=int(sx), y=int(sy),
             )
         )

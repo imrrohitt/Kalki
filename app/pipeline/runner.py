@@ -332,6 +332,7 @@ class Pipeline:
                 job_id=job.job_id,
                 reference_text=reference_text,
                 audio_path=str(audio_path) if audio_path.exists() else None,
+                caption_style=job.caption_style,
             )
             timeline = result.timeline
             brief_mood = result.brief.music_mood
@@ -378,6 +379,7 @@ class Pipeline:
             accents=accents,
             music_mood=brief_mood,
             video_duration=duration,
+            caption_style=job.caption_style,
         )
         job.metrics["render_time_ms"] = int((time.perf_counter() - t_render) * 1000)
         logger.info("[%s] render done (%.1fs)", jid, time.perf_counter() - t_render)

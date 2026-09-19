@@ -107,6 +107,7 @@ Everything above is the **full-frame** path — the default. There's also an old
 | `underline` | Hairline rule + sparkle | A concrete key term |
 | `tape` | Dark serif on a torn sage sticker | One dramatic word |
 | `chip` | Colored rounded pill (navy / terracotta / forest, rotating) | A specific figure, a genuine surprise/excited line, or a real vocal-loudness spike |
+| `bubble` | Black rounded pill + star sparkle (`caption_style=premium` only) | A direct follow/subscribe/comment ask |
 
 **Mood → motion.** A line the annotate pass reads as `surprise` or `excited` — or one
 the speaker's own voice gets genuinely louder on — pops in with a quick scale-bounce
@@ -140,6 +141,26 @@ and a mid-roll shot in a dim room both stay fully legible, in the same render.
   <img src="docs/samples/kind-stat.jpg" width="140" alt="Stat callout example">
 </p>
 
+### Premium caption style
+
+`?caption_style=premium` on `POST /videos` layers three extra, sparingly-used moves
+on top of the same AI-judged captions — classic is untouched unless you ask for this:
+
+| Feature | Look | Fires on |
+| --- | --- | --- |
+| `bubble` | A black rounded pill with a cream outline and a small star sparkle | The rare line the director tags as a direct ask — follow, subscribe, comment |
+| Hand-marker font | `plain`/`mix`/`serif` lines rendered in a real chalk/marker typeface (Permanent Marker) instead of the usual sans | Short (1-4 word) lines, spaced at least 15s apart |
+| Chest placement | The caption sits over the chest/torso instead of above the head | Framing permitting (skipped on a tight face-filling close-up), spaced at least 9s apart |
+
+The bubble is an LLM decision (the director tags a line `cta`); the font and screen
+position are decided deterministically in the renderer, which is the only layer that
+actually knows the video's framing geometry. The very first caption (the hook) is
+never touched, so the opening beat always looks the same as classic.
+
+```bash
+curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?caption_style=premium"
+```
+
 ## Sound
 
 - **Music** — a licensed track in `MUSIC_DIR` wins (mood words in the filename help
@@ -147,7 +168,8 @@ and a mid-roll shot in a dim room both stay fully legible, in the same render.
   (pads + a soft arpeggio, no drums), ducked under the voice with a sidechain
   compressor to sit ~18 dB below it.
 - **Accents** — a soft riser on the hook, a synthesized sparkle on an oval/underline,
-  a swoosh under a tape sticker. At most one every 12 seconds.
+  a swoosh under a tape sticker, a rounded "bloop" pop under a premium CTA bubble. At
+  most one every 12 seconds.
 - **Voice** — high-pass filtered, gently compressed, and the final mix normalized to
   −15 LUFS / −1.5 dBTP for Reels/TikTok/Shorts delivery.
 
@@ -215,6 +237,13 @@ to the MP4 — so an edit can be inspected, or hand-tuned, without calling the L
 python scripts/run_pipeline.py talk.mp4 storage/my_run
 ```
 
+Pass `classic`/`premium` as the 6th argument (after theme, split, and an optional
+reference transcript) to try the [premium caption style](#premium-caption-style):
+
+```bash
+python scripts/run_pipeline.py talk.mp4 storage/my_run "" false "" premium
+```
+
 Pass a 4th argument pointing at a `.md`/`.txt` transcript to use it as ground truth
 for meaning while Whisper still supplies the timing — useful when you already have an
 accurate script and just want Whisper's word-level alignment.
@@ -224,6 +253,7 @@ accurate script and just want Whisper's word-level alignment.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/v1/videos` | Talking-head reel. Full-frame caption director by default. |
+| `POST` | `/api/v1/videos?caption_style=premium` | Same director, plus CTA bubble / hand-marker font / chest placement — see [above](#premium-caption-style). |
 | `POST` | `/api/v1/videos?split_screen=true` | The older split-canvas layout (see below). |
 | `POST` | `/api/v1/reels?theme=` | Audio-only → full-canvas motion reel. |
 | `GET` | `/api/v1/jobs/{job_id}` | Status, stage, progress, `job_dir`, `output_path`. |

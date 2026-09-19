@@ -136,7 +136,7 @@ underlines, tape stickers) and the motion (a still rise, or a quick "blink" pop 
 real high) and the rare contextual icon.
 
 Return JSON only:
-{"lines": [{"i": 0, "key": "interviews", "weight": 1, "kind": "normal", "mood": "neutral", "icon": "none"}]}
+{"lines": [{"i": 0, "key": "interviews", "weight": 1, "kind": "normal", "mood": "neutral", "icon": "none", "cta": false}]}
 
 For EVERY line:
 - `key`: the single most meaningful word, or 2-word term, copied exactly from the line
@@ -190,10 +190,15 @@ For EVERY line:
   "none" is still right when a line truly isn't about any of them, but don't default to
   "none" out of caution; a caption edit with icons scattered through it reads as designed,
   one with none at all reads as unfinished.
+- `cta`: true only when this exact line is directly asking the VIEWER to do something
+  right now — follow, subscribe, comment, share, save, tag a friend, "link in bio". False
+  for everything else, including when the speaker just mentions a platform or describes
+  what someone else did (DMed, commented) without asking the viewer to act. This should
+  be rare — usually 0-2 lines in a whole reel, often at the very end.
 
-Judge generously but honestly: weight, mood, and icon should each reflect what the line
-actually is. The goal is a caption track that feels hand-edited by someone who was paying
-close attention to the whole talk — varied, textured, never flat, never random.
+Judge generously but honestly: weight, mood, icon, and cta should each reflect what the
+line actually is. The goal is a caption track that feels hand-edited by someone who was
+paying close attention to the whole talk — varied, textured, never flat, never random.
 """
 
 
@@ -242,6 +247,7 @@ class DirectorResult:
                 "emphasis": d.emphasis,
                 "mood": d.mood,
                 "icon": d.icon,
+                "cta": d.cta,
                 "key": note.key,
                 "weight": note.weight,
                 "kind": note.kind,
@@ -412,6 +418,12 @@ def annotation_problems(data: dict[str, Any], lines: list[str]) -> list[str]:
             "every single line has icon=none; look again for lines genuinely about money, growth, an "
             "idea, video/social platforms, a warning, time, a goal, hype, something personal, quality, "
             "privacy, or a doubt, and give roughly one in every 6-10 lines a matching icon"
+        )
+    cta_count = sum(1 for item in seen.values() if bool(item.get("cta")))
+    if cta_count > max(2, len(lines) // 15):
+        problems.append(
+            f"{cta_count} lines are marked cta=true; that is too many — cta is for a genuine direct "
+            "ask to the viewer (follow/subscribe/comment/share), usually 0-2 per reel"
         )
     return problems[:15]
 
@@ -649,10 +661,14 @@ class CaptionDirector:
                 kind=kind if kind in LINE_KINDS else "normal",
                 mood=mood if mood in MOODS else "neutral",
                 icon=icon if icon in ICONS else "none",
+                cta=bool(item.get("cta")),
             )
         moody = sum(1 for note in notes if note.mood != "neutral")
         iconed = sum(1 for note in notes if note.icon != "none")
-        logger.info("director annotate: %s lines with a mood, %s with an icon", moody, iconed)
+        cta_n = sum(1 for note in notes if note.cta)
+        logger.info(
+            "director annotate: %s lines with a mood, %s with an icon, %s cta", moody, iconed, cta_n
+        )
         return notes
 
     # ------------------------------------------------------------------- run
@@ -664,6 +680,7 @@ class CaptionDirector:
         job_id: str = "director",
         reference_text: str = "",
         audio_path: str | None = None,
+        caption_style: str = "classic",
     ) -> DirectorResult:
         """`audio_path` (16kHz mono PCM wav) is optional but recommended: it is
         the one signal in this whole pipeline read from the actual voice
@@ -733,7 +750,9 @@ class CaptionDirector:
         except Exception as exc:  # noqa: BLE001 - craft still designs from heuristics
             logger.warning("[%s] director annotate failed, heuristic weights: %s", jid, exc)
             line_notes = [LineNote() for _ in drafts]
-        drafts = assign_styles(drafts, line_notes, words, loud_times=loud_times, loud_db=loud_db)
+        drafts = assign_styles(
+            drafts, line_notes, words, loud_times=loud_times, loud_db=loud_db, caption_style=caption_style
+        )
         metrics["design_ms"] = int((time.perf_counter() - t3) * 1000)
 
         drafts = enforce_design_rules(drafts, words)

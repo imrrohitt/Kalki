@@ -31,6 +31,8 @@ AUDIO_SUFFIXES = {
     ".aif",
 }
 
+CAPTION_STYLES = {"classic", "premium"}
+
 
 def get_pipeline() -> Pipeline:
     global _pipeline
@@ -50,6 +52,7 @@ def _job_payload(job: Job, *, include_progress: bool = False) -> dict:
     }
     if job.kind == "video":
         payload["split_screen"] = job.split_layout
+        payload["caption_style"] = job.caption_style
     if include_progress:
         payload["stage"] = job.stage
         payload["progress"] = job.progress
@@ -104,6 +107,16 @@ async def upload_video(
         False,
         description="If true, graphics panel above the speaker. Default is full-frame talking-head.",
     ),
+    caption_style: str = Query(
+        "classic",
+        description=(
+            "Full-frame captions only. 'classic' (default) is the existing caption "
+            "director look, unchanged. 'premium' additionally uses a black CTA bubble "
+            "on direct asks (follow/subscribe), an occasional hand-marker font line, "
+            "and — when the framing shows enough of the speaker — an occasional "
+            "chest-area placement."
+        ),
+    ),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
@@ -113,23 +126,31 @@ async def upload_video(
             status_code=400,
             detail=f"Unknown theme '{theme}'. Available: {sorted(THEMES.keys())}",
         )
+    caption_style = caption_style.strip().lower() or "classic"
+    if caption_style not in CAPTION_STYLES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown caption_style '{caption_style}'. Available: {sorted(CAPTION_STYLES)}",
+        )
 
     suffix = Path(file.filename).suffix or ".mp4"
     job = job_store.create(source_path="")
     job.theme = theme
     job.split_layout = split_screen
+    job.caption_style = caption_style
     _store_source(job, file, suffix)
     if transcript is not None and transcript.filename:
         _store_transcript(job, transcript)
 
     size_mb = Path(job.source_path).stat().st_size / (1024 * 1024)
     logger.info(
-        "[%s] uploaded %s (%.1f MB) theme=%s split_screen=%s dir=%s",
+        "[%s] uploaded %s (%.1f MB) theme=%s split_screen=%s caption_style=%s dir=%s",
         job.job_id[:8],
         file.filename,
         size_mb,
         theme or settings.graphics_theme,
         split_screen,
+        caption_style,
         job.job_dir,
     )
 
