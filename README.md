@@ -11,7 +11,7 @@ A Pillow + FFmpeg renderer draws it in native resolution with an adaptive soundt
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white)](#http-api)
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-libx264-007808?style=flat-square&logo=ffmpeg&logoColor=white)](#rendering)
 [![DeepSeek](https://img.shields.io/badge/LLM-DeepSeek--V4-black?style=flat-square)](#how-it-works)
-[![Tests](https://img.shields.io/badge/tests-97%20passing-3fb950?style=flat-square&logo=pytest&logoColor=white)](#testing)
+[![Tests](https://img.shields.io/badge/tests-102%20passing-3fb950?style=flat-square&logo=pytest&logoColor=white)](#testing)
 [![License](https://img.shields.io/badge/license-proprietary-lightgrey?style=flat-square)](#license)
 
 [Demo](#demo) · [Features](#features) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Caption design](#caption-design) · [HTTP API](#http-api) · [Configuration](#configuration)
@@ -49,9 +49,11 @@ even when the speaker walks from a dark room into open sky.
 ## Features
 
 - 🧠 **A real editorial pass, not keyword spotting** — a 4-stage DeepSeek pipeline (brief → script → review → annotate) reads the whole transcript before writing a single caption, in English, Hindi, or Hinglish.
-- 🎬 **9 caption treatments** — plain, mix, serif, stack, quote, hand-drawn oval, underline, paper-tape sticker, and a colored money/stat chip — assigned by rhythm rules so the same look never repeats too often.
-- ✨ **Mood-aware motion** — a line the AI reads as a genuine surprise or high "blinks" in with a quick pop instead of the usual smooth rise. Rare by design: a highlight, not a tic.
-- 🏷️ **Contextual icon badges** — money, growth, idea, video, social, and check-mark badges appear on the rare line that's unmistakably about one of those, never as decoration.
+- 🎬 **9 caption treatments** — plain, mix, serif, stack, quote, hand-drawn oval, underline, paper-tape sticker, and a colored stat/highlight chip in 3 rotating colors — assigned by rhythm rules so the same look never repeats too often.
+- 🎙️ **Real acoustic emphasis, not just text** — the only signal in the pipeline read from the actual voice: a cheap loudness pass flags the rare moment the speaker's own voice gets genuinely louder than their typical level, earning a pop or a colored highlight even on a line the transcript alone reads flat.
+- ✨ **Mood-aware motion** — a line the AI reads as a genuine surprise or high (from the words, or from real vocal loudness) "blinks" in with a quick pop instead of the usual smooth rise.
+- 🎨 **Colored highlights beyond just numbers** — the chip background fires on a specific figure (`$2,000`, `40 lakh`) *or* a line judged genuinely surprising/excited *or* a real volume spike — a figure always keeps first claim on the slot.
+- 🏷️ **14 contextual icon badges** — money, growth, idea, video, social, check, warning, time, target, fire, heart, star, lock, question — hand-drawn badges on the line that's unmistakably about one of those.
 - 🌓 **Per-caption adaptive color** — one low-res pass reads the real background brightness under *each* caption's own on-screen window and flips the whole palette (white/cream ↔ dark-ink/gold) so nothing goes invisible on a bright wall or open sky.
 - 🎯 **A front-loaded hook** — the first 30 seconds gets first claim on the rare accents, because that window decides whether someone keeps watching.
 - 🔊 **An adaptive soundtrack** — a mood-matched music bed (licensed track or synthesized ambient pad), ducked under the voice with a sidechain compressor, plus a sparse set of risers and sparkles tied to the caption design — never a hit per word.
@@ -104,17 +106,26 @@ Everything above is the **full-frame** path — the default. There's also an old
 | `oval` | Cream serif circled by a hand-drawn ring + sparkles | The key concept of a beat |
 | `underline` | Hairline rule + sparkle | A concrete key term |
 | `tape` | Dark serif on a torn sage sticker | One dramatic word |
-| `chip` | Colored rounded pill (alternating navy/terracotta) | A specific figure — `$45,000`, `40 lakh`, `50%` |
+| `chip` | Colored rounded pill (navy / terracotta / forest, rotating) | A specific figure, a genuine surprise/excited line, or a real vocal-loudness spike |
 
-**Mood → motion.** A line the annotate pass reads as `surprise` or `excited` pops in
-with a quick scale-bounce instead of the standard rise — on just the emphasized word
-inside an ordinary sentence, or the whole phrase for a one-beat style like `serif`.
-Gated to roughly once every 9 seconds so it stays a highlight.
+**Mood → motion.** A line the annotate pass reads as `surprise` or `excited` — or one
+the speaker's own voice gets genuinely louder on — pops in with a quick scale-bounce
+instead of the standard rise — on just the emphasized word inside an ordinary sentence,
+or the whole phrase for a one-beat style like `serif`. Roughly one in 8-10 lines, not
+once per video.
 
-**Icon badges.** `money` `growth` `idea` `video` `social` `check` — small hand-drawn
-circular badges beside the rare line that's unmistakably about one of those. At most
-one every ~16 seconds, and never doubled up with a `chip` line (the pill is already
-the "notice this" signal).
+**Acoustic emphasis.** The only signal here read from the actual audio rather than the
+transcript: a cheap RMS-loudness pass over the voice track (the same 16kHz mono file
+already extracted for Whisper) flags the rare span where the speaker is genuinely
+louder than their own typical level — relative to their own spread, not a fixed dB
+number, since mic gain varies per recording. A real spike earns the same pop/chip
+treatment as an LLM-judged high point, even on a line the transcript alone reads flat.
+
+**Icon badges — 14 of them.** `money` `growth` `idea` `video` `social` `check`
+`warning` `time` `target` `fire` `heart` `star` `lock` `question` — small hand-drawn
+circular badges beside the line that's unmistakably about one of those. At most one
+every ~13 seconds, and never doubled up with a `chip` line (the pill is already the
+"notice this" signal).
 
 **Adaptive color.** Every caption independently reads the real video luminance under
 its own time window (one cheap low-res decode of the whole reel, not a single guess)
@@ -313,7 +324,7 @@ scripts/                      Local runners (no API server needed)
 pytest -q
 ```
 
-97 tests. LLM calls are stubbed with a fake completions client so the director,
+102 tests. LLM calls are stubbed with a fake completions client so the director,
 craft, and rendering logic run deterministically offline; the renderer tests exercise
 the real FFmpeg filter graph and Pillow compositing.
 
