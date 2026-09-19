@@ -161,6 +161,12 @@ never touched, so the opening beat always looks the same as classic.
 curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?caption_style=premium"
 ```
 
+<p align="center">
+  <a href="docs/samples/premium-marker-preview-12s.mp4"><strong>▶ Hand-marker font</strong></a>
+  &nbsp;·&nbsp;
+  <a href="docs/samples/premium-bubble-preview-8s.mp4"><strong>▶ CTA bubble</strong></a>
+</p>
+
 ## Sound
 
 - **Music** — a licensed track in `MUSIC_DIR` wins (mood words in the filename help
