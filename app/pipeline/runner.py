@@ -355,7 +355,7 @@ class Pipeline:
         logger.info("[%s] captions: %s lines (%.1fs)", jid, len(timeline.captions), time.perf_counter() - t_dir)
 
         job.set_stage(JobStatus.planning_edits)
-        accents = plan_accents(timeline, video_duration=duration)
+        accents = plan_accents(timeline, video_duration=duration, caption_style=job.caption_style)
         edit_plan = EditTimeline(captions=list(timeline.captions), sfx=accents)
         edit_plan_path = job_dir / "edit_plan.json"
         edit_plan_path.write_text(

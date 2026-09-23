@@ -33,6 +33,9 @@ from app.config import ROOT_DIR
 FONT_DIR = ROOT_DIR / "assets" / "fonts"
 SANS_FONT = str(FONT_DIR / "Montserrat-Bold.ttf")
 SERIF_FONT = str(FONT_DIR / "PlayfairDisplay-Regular.ttf")
+# The editorial theme's emphasis word — a genuine italic serif, not a filter
+# tilt, matching the clean "creator commentary" reference look.
+SERIF_ITALIC_FONT = str(FONT_DIR / "PlayfairDisplay-Italic.ttf")
 
 WHITE = (255, 255, 255)
 CREAM = (255, 246, 194)
@@ -91,6 +94,15 @@ POP_DUR = 0.24
 
 SERIF_LINE_STYLES = {"serif", "oval", "quote"}
 DECORATED = {"oval", "underline", "tape", "blob"}
+# Editorial theme: words snap in fully typed (no rise/slide) with a blinking
+# text cursor trailing the most recent one — a genuine typewriter reveal
+# rather than a filter. Applies to the per-word treatments only; a whole-line
+# serif statement keeps its soft fade, same as classic/premium.
+TYPEWRITER_TREATMENTS = {"plain", "mix", "underline", "stack"}
+CURSOR_ON = 0.22
+CURSOR_OFF = 0.16
+CURSOR_MAX_S = 0.85  # stop blinking after this long even on a long pause
+CURSOR_GAP = 4.0  # px at u=1, between the word's last glyph and the cursor
 
 
 @lru_cache(maxsize=128)
@@ -557,7 +569,10 @@ class CaptionLayer:
                     if single_emphasis and _is_acronym(text):
                         tok = _Token(word, text, SANS_FONT, FS_ACRONYM, accent_color)
                     else:
-                        tok = _Token(word, text, SERIF_FONT, FS_SERIF_INLINE, accent_color)
+                        emph_font = (
+                            SERIF_ITALIC_FONT if self.caption_style == "editorial" else SERIF_FONT
+                        )
+                        tok = _Token(word, text, emph_font, FS_SERIF_INLINE, accent_color)
                 else:
                     tok = _Token(word, text, SANS_FONT, FS_SANS, body_color)
                 line.append(tok)
@@ -577,8 +592,8 @@ class CaptionLayer:
                 tok.color,
                 u=u,
                 shadow=self.shadow if tok.shadow else 0.0,
-                # Playfair Regular hairlines break up under video compression.
-                stroke=1 if tok.font_path == SERIF_FONT and u >= 0.9 else 0,
+                # Playfair hairlines break up under video compression.
+                stroke=1 if tok.font_path in (SERIF_FONT, SERIF_ITALIC_FONT) and u >= 0.9 else 0,
             )
             for tok in tokens
         ]
@@ -614,6 +629,10 @@ class CaptionLayer:
         baseline = float(self.baseline_chest if use_chest else self.baseline)
         line_meta: list[tuple[float, float, float, float, float]] = []  # x0, x1, ink_top, ink_bottom, size
         prev_size = 0.0
+        # Editorial theme: (t_in, cursor_x, cursor_y, color, font_path, size_px)
+        # per word, in reveal order, consumed after the loop to build the
+        # trailing blinking cursor.
+        typewriter_marks: list[tuple[float, float, float, tuple, str, float]] = []
         for li, tokens in enumerate(lines):
             if not tokens:
                 continue
@@ -630,6 +649,11 @@ class CaptionLayer:
             whole_line = treatment in SERIF_LINE_STYLES or treatment in {"tape", "chip", "bubble"} or (
                 treatment == "stack" and li == 0
             )
+            typewriter = (
+                self.caption_style == "editorial"
+                and treatment in TYPEWRITER_TREATMENTS
+                and not whole_line
+            )
             # A pop applies to the whole phrase when it reveals as one unit
             # (serif/oval/tape/chip), or only to its emphasized cream word
             # inside an ordinary sentence — the rest of the line still just
@@ -639,11 +663,18 @@ class CaptionLayer:
                 if whole_line:
                     t_in = cap.start + 0.05 * k + (0.14 if treatment in {"tape", "chip", "bubble"} else 0.0)
                     dur, rise = LINE_IN, 16 * u
+                elif typewriter:
+                    t_in = max(cap.start, tok.word.start)
+                    dur, rise = 0.0, 0.0
                 else:
                     t_in = max(cap.start, tok.word.start)
-                    serif = tok.font_path == SERIF_FONT
+                    serif = tok.font_path in (SERIF_FONT, SERIF_ITALIC_FONT)
                     dur, rise = (0.22, 14 * u) if serif else (WORD_IN, 11 * u)
                 t_in = min(t_in, max(cap.start, cap.end - 0.2))
+                if typewriter:
+                    typewriter_marks.append(
+                        (t_in, x_left + dx + sp.advance, baseline, tok.color, tok.font_path, tok.size * scale)
+                    )
                 if pop_line and (whole_line or tok.word.emphasis):
                     cx = x_left + dx - sp.ox + sp.arr.shape[1] / 2
                     cy = baseline - sp.oy + sp.arr.shape[0] / 2
@@ -675,6 +706,9 @@ class CaptionLayer:
             ink_bottom = baseline + max(sp.ink_bottom for sp in sprites)
             line_meta.append((x_left, x_left + width, ink_top, ink_bottom, size))
 
+        if typewriter_marks:
+            elements.extend(self._typewriter_cursor(cap, typewriter_marks))
+
         if not line_meta:
             return elements
         first = line_meta[0]
@@ -690,6 +724,44 @@ class CaptionLayer:
             elements[:0] = self._bubble(cap, first)
         if cap.icon and cap.icon != "none":
             elements[:0] = self._icon_badge(cap, first, cap.icon)
+        return elements
+
+    def _typewriter_cursor(
+        self,
+        cap: Caption,
+        marks: list[tuple[float, float, float, tuple[int, int, int], str, float]],
+    ) -> list[Element]:
+        """A blinking text cursor trailing each word as it's 'typed' — the
+        editorial theme's signature reveal. Built from a real glyph in the
+        same font/size/color as the word it follows, so it sits on the exact
+        baseline rather than a drawn rectangle. Implemented as a run of
+        zero-duration elements covering only the blink-ON windows — the
+        blink-OFF gaps between them simply have nothing to draw, so no change
+        to the element/draw machinery is needed."""
+        u = self.u
+        elements: list[Element] = []
+        for i, (t_in, cx, cy, color, font_path, size_px) in enumerate(marks):
+            t_next = marks[i + 1][0] if i + 1 < len(marks) else cap.end
+            t_end = min(t_next, t_in + CURSOR_MAX_S, cap.end)
+            if t_end <= t_in:
+                continue
+            sp = text_sprite("|", _font(font_path, round(size_px * u)), color, u=u, shadow=self.shadow)
+            x = int(round(cx + CURSOR_GAP * u - sp.ox))
+            y = int(round(cy - sp.oy))
+            t = t_in
+            on = True
+            while t < t_end - 1e-6:
+                span = CURSOR_ON if on else CURSOR_OFF
+                seg_end = min(t + span, t_end)
+                if on:
+                    elements.append(
+                        self._element(
+                            t_in=t, dur=0.0, t_out=seg_end, mode="rise",
+                            arr=sp.arr, x=x, y=y, rise=0.0,
+                        )
+                    )
+                t = seg_end
+                on = not on
         return elements
 
     # ---------------------------------------------------------- decorations

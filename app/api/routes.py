@@ -31,7 +31,7 @@ AUDIO_SUFFIXES = {
     ".aif",
 }
 
-CAPTION_STYLES = {"classic", "premium"}
+CAPTION_STYLES = {"classic", "premium", "editorial"}
 
 
 def get_pipeline() -> Pipeline:
@@ -114,7 +114,10 @@ async def upload_video(
             "director look, unchanged. 'premium' additionally uses a black CTA bubble "
             "on direct asks (follow/subscribe), an occasional hand-marker font line, "
             "and — when the framing shows enough of the speaker — an occasional "
-            "chest-area placement."
+            "chest-area placement. 'editorial' is a clean, undecorated creator-commentary "
+            "look — white sans with an italic cream-serif emphasis word, a typewriter "
+            "word-by-word reveal with a blinking cursor, and the same CTA bubble as "
+            "premium — no ovals/underlines/tape/chips."
         ),
     ),
 ):

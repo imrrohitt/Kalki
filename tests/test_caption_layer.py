@@ -8,7 +8,7 @@ from app.renderer.caption_layer import BRIGHT_INK, WHITE, CaptionLayer
 from app.renderer.soundtrack import build_soundtrack, plan_accents, synthesize_music_bed
 
 
-def _cap(start, end, text, treatment, emphasis=(), mood="neutral", icon="none"):
+def _cap(start, end, text, treatment, emphasis=(), mood="neutral", icon="none", cta=False):
     tokens = text.replace("\n", " ").split()
     step = (end - start) / (len(tokens) + 1)
     return Caption(
@@ -18,6 +18,7 @@ def _cap(start, end, text, treatment, emphasis=(), mood="neutral", icon="none"):
         treatment=treatment,
         mood=mood,
         icon=icon,
+        cta=cta,
         words=[
             CaptionWord(text=t, start=start + i * step, end=start + (i + 1) * step, emphasis=t in emphasis)
             for i, t in enumerate(tokens)
@@ -227,6 +228,89 @@ def test_bubble_treatment_renders_a_distinct_dark_badge():
     # The pill fill is near-black — distinct from every chip color.
     ys, xs = np.nonzero(band[..., 3] > 250)
     assert len(ys) > 0
+    corner = band[ys.min() + 3, xs[np.argmin(np.abs(xs - xs.min()))], :3]
+    assert corner.max() < 60
+
+
+def test_editorial_style_italicizes_the_emphasis_word():
+    """The editorial theme's signature pairing is a genuine italic serif for
+    the emphasis word, not the upright Playfair classic/premium use."""
+    cap = _cap(0.0, 2.0, "I am making the biggest mistake", "mix", emphasis=("biggest",))
+    timeline = CaptionTimeline(captions=[cap])
+    classic = CaptionLayer(timeline, width=1080, height=1920, head_top=640, caption_style="classic")
+    editorial = CaptionLayer(timeline, width=1080, height=1920, head_top=640, caption_style="editorial")
+    band_classic = classic.frame_rgba(1.8)
+    band_editorial = editorial.frame_rgba(1.8)
+    assert band_classic[..., 3].sum() != band_editorial[..., 3].sum()
+
+
+def test_editorial_style_never_uses_premium_variety():
+    """Editorial and premium are separate themes — chest placement and the
+    hand-marker font rotation stay exclusive to premium."""
+    caps = [_cap(i * 4.0, i * 4.0 + 3.0, f"caption number {i}", "plain") for i in range(8)]
+    tl = CaptionTimeline(captions=caps)
+    layer = CaptionLayer(
+        tl, width=1080, height=1920, head_top=int(1920 * 0.22), caption_style="editorial"
+    )
+    assert layer.baseline_chest is None
+    assert all(c.screen_area == "head" and c.font_variant == "default" for c in layer.captions)
+
+
+def test_editorial_style_types_words_in_instantly_with_no_rise():
+    """The typewriter reveal snaps each word in fully formed the instant it's
+    spoken — no slide-up — unlike classic's soft rise."""
+    cap = _cap(0.0, 3.0, "what if I really tried", "plain")
+    timeline = CaptionTimeline(captions=[cap])
+    classic = CaptionLayer(timeline, width=1080, height=1920, head_top=640, caption_style="classic")
+    editorial = CaptionLayer(timeline, width=1080, height=1920, head_top=640, caption_style="editorial")
+    # Sample a moment just after the first word starts (t=0): classic is
+    # still rising (softer/lower ink coverage), editorial is already at full
+    # strength since dur=0 for a typewriter snap.
+    t = 0.03
+    classic_ink = int((classic.frame_rgba(t)[..., 3] > 200).sum())
+    editorial_ink = int((editorial.frame_rgba(t)[..., 3] > 200).sum())
+    assert editorial_ink > classic_ink
+
+
+def test_editorial_style_cursor_blinks_after_the_latest_word():
+    """A trailing text cursor blinks on/off after the most recently typed
+    word — visible ink coverage must oscillate between the blink-on and
+    blink-off phases while the caption waits for the next word."""
+    cap = _cap(0.0, 3.0, "what if I really tried", "plain")
+    timeline = CaptionTimeline(captions=[cap])
+    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640, caption_style="editorial")
+    from app.renderer.caption_layer import CURSOR_OFF, CURSOR_ON
+
+    on_count = int((layer.frame_rgba(0.05)[..., 3] > 32).sum())
+    off_count = int((layer.frame_rgba(0.05 + CURSOR_ON + 0.02)[..., 3] > 32).sum())
+    assert on_count != off_count
+    assert CURSOR_ON > 0 and CURSOR_OFF > 0
+
+
+def test_editorial_style_gives_mood_pops_a_sound_cue():
+    """Editorial has no oval/underline/tape to hang a sound on, so its
+    mood-driven pop moments earn a shimmer instead — otherwise the reel
+    would go silent after the hook riser."""
+    timeline = CaptionTimeline(
+        captions=[
+            _cap(0.0, 1.0, "hook line", "plain"),
+            _cap(15.0, 17.0, "you will not believe this", "mix", emphasis=("believe",), mood="surprise"),
+        ]
+    )
+    classic_hits = plan_accents(timeline, video_duration=20.0, caption_style="classic")
+    assert len(classic_hits) == 1  # just the hook riser — plain/mix carries no sound in classic
+    editorial_hits = plan_accents(timeline, video_duration=20.0, caption_style="editorial")
+    pops = [h for h in editorial_hits if h.reason == "mood-pop"]
+    assert len(pops) == 1
+    assert pops[0].kind == "shimmer"
+
+
+def test_editorial_style_still_renders_a_cta_bubble():
+    timeline = CaptionTimeline(captions=[_cap(0.0, 2.0, "follow for more", "bubble")])
+    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640, caption_style="editorial")
+    band = layer.frame_rgba(1.5)
+    assert band[..., 3].max() > 200
+    ys, xs = np.nonzero(band[..., 3] > 250)
     corner = band[ys.min() + 3, xs[np.argmin(np.abs(xs - xs.min()))], :3]
     assert corner.max() < 60
 

@@ -54,6 +54,9 @@ class Job:
     # director look, unchanged. "premium" adds a black CTA bubble, an
     # occasional hand-marker font line, and — framing permitting — an
     # occasional chest-area placement, on top of the same AI-judged captions.
+    # "editorial" is a clean, undecorated look: italic cream-serif emphasis
+    # words, a typewriter word-by-word reveal with a blinking cursor, and the
+    # same CTA bubble as premium — no ovals/underlines/tape/chips.
     caption_style: str = "classic"
     status: JobStatus = JobStatus.uploaded
     stage: str = JobStatus.uploaded.value

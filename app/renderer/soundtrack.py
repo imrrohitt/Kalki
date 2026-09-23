@@ -240,7 +240,9 @@ def pick_music_track(mood_name: str) -> Path | None:
     return best
 
 
-def plan_accents(timeline: CaptionTimeline, *, video_duration: float) -> list[SfxHit]:
+def plan_accents(
+    timeline: CaptionTimeline, *, video_duration: float, caption_style: str = "classic"
+) -> list[SfxHit]:
     """Hook riser plus sparse sparkles on hand-drawn moments. Never per word."""
     hits: list[SfxHit] = []
     caps = timeline.captions
@@ -248,15 +250,25 @@ def plan_accents(timeline: CaptionTimeline, *, video_duration: float) -> list[Sf
         first = caps[0]
         hits.append(SfxHit(at=max(0.0, first.start), kind="riser", gain=0.14, reason="hook"))
     last_at = -99.0
+    # Editorial has no oval/underline/tape to hang a sound on (it's a
+    # deliberately undecorated look) — its only other visual accent is the
+    # mood-driven pop, so that's what earns the sparkle here instead, keeping
+    # "a sound whenever something happens" true for this theme too.
+    sound_treatments = {"bubble"} if caption_style == "editorial" else {"oval", "underline", "tape", "bubble"}
     for cap in caps[1:]:
-        if cap.treatment not in {"oval", "underline", "tape", "bubble"}:
+        is_mood_pop = caption_style == "editorial" and cap.mood in {"surprise", "excited"}
+        if cap.treatment not in sound_treatments and not is_mood_pop:
             continue
         at = cap.start + (0.30 if cap.treatment in {"oval", "bubble"} else 0.2)
         if at - last_at < 12.0 or at > video_duration - 0.5:
             continue
-        kind = "swoosh" if cap.treatment == "tape" else "pop" if cap.treatment == "bubble" else "shimmer"
-        gain = {"oval": 0.13, "underline": 0.09, "tape": 0.10, "bubble": 0.16}[cap.treatment]
-        hits.append(SfxHit(at=round(at, 3), kind=kind, gain=gain, reason=cap.treatment))
+        if cap.treatment in sound_treatments:
+            kind = "swoosh" if cap.treatment == "tape" else "pop" if cap.treatment == "bubble" else "shimmer"
+            gain = {"oval": 0.13, "underline": 0.09, "tape": 0.10, "bubble": 0.16}[cap.treatment]
+            reason = cap.treatment
+        else:
+            kind, gain, reason = "shimmer", 0.10, "mood-pop"
+        hits.append(SfxHit(at=round(at, 3), kind=kind, gain=gain, reason=reason))
         last_at = at
     return hits[:10]
 

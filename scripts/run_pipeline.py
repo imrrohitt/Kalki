@@ -7,7 +7,7 @@ Usage: python scripts/run_pipeline.py <source_video> [out_dir] [theme] [split] [
 Themes: paper (default) | noir | tech | ivory  (split layout only)
 split: false (default) | true
 reference.md: optional creator transcript/translation used as ground truth for meaning
-caption_style: classic (default) | premium  (full-frame only)
+caption_style: classic (default) | premium | editorial  (full-frame only)
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ async def main() -> None:
             json.dumps(result.design(), indent=2, ensure_ascii=False), encoding="utf-8"
         )
         log.info("director: %s captions %s", len(result.timeline.captions), result.metrics)
-        accents = plan_accents(result.timeline, video_duration=info.duration)
+        accents = plan_accents(result.timeline, video_duration=info.duration, caption_style=caption_style)
         t_render = time.perf_counter()
         FFmpegRenderer(split_layout=False).render_overlay_reel(
             source_video=src,

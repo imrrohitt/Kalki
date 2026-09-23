@@ -519,6 +519,10 @@ def assign_styles(
         return []
     notes = list(notes) + [LineNote()] * max(0, len(drafts) - len(notes))
     n = len(drafts)
+    # Editorial is a deliberately undecorated look — plain/mix/serif/stack and
+    # a rare CTA bubble, no hand-drawn oval/underline/tape/quote or colored
+    # chip. Those stay exclusive to classic/premium.
+    decorative_enabled = caption_style != "editorial"
     texts = [_strip_greeting(d.text) if i <= 1 else d.text for i, d in enumerate(drafts)]
     times = [words[d.first].start for d in drafts]
     styles = ["plain"] * n
@@ -580,25 +584,26 @@ def assign_styles(
     #    claim on the slot (pass 2a); emotional/vocal highlights only fill
     #    slots a figure isn't using nearby (pass 2b) — a real dollar amount
     #    should never lose its pill to an unrelated nearby highlight.
-    for i in range(n):
-        if free(i) and MONEY_RE.search(texts[i]):
+    if decorative_enabled:
+        for i in range(n):
+            if free(i) and MONEY_RE.search(texts[i]):
+                if len(texts[i].split()) <= MAX_WORDS["chip"] and clear(i, "chip"):
+                    styles[i] = "chip"
+        for i in range(n):
+            if not free(i):
+                continue
+            is_vocal_high = loud[i] and notes[i].weight >= 1
+            is_llm_high = notes[i].mood in MOODS_THAT_POP and notes[i].weight >= 2
+            if not (is_vocal_high or is_llm_high):
+                continue
             if len(texts[i].split()) <= MAX_WORDS["chip"] and clear(i, "chip"):
                 styles[i] = "chip"
-    for i in range(n):
-        if not free(i):
-            continue
-        is_vocal_high = loud[i] and notes[i].weight >= 1
-        is_llm_high = notes[i].mood in MOODS_THAT_POP and notes[i].weight >= 2
-        if not (is_vocal_high or is_llm_high):
-            continue
-        if len(texts[i].split()) <= MAX_WORDS["chip"] and clear(i, "chip"):
-            styles[i] = "chip"
 
-    # 2.5. Premium theme only: a black CTA bubble on the rare line that is
+    # 2.5. Premium/editorial only: a black CTA bubble on the rare line that is
     #      genuinely asking the viewer to do something right now — follow,
     #      subscribe, comment, share. Judged by the LLM (LineNote.cta), same
     #      pattern as mood/icon; never fires in the classic style.
-    if caption_style == "premium":
+    if caption_style in {"premium", "editorial"}:
         for i in range(n):
             if not free(i) or not notes[i].cta:
                 continue
@@ -608,28 +613,29 @@ def assign_styles(
     # 3. Hand-drawn accents on the key ideas.
     accent_for = {"concept": "oval", "term": "underline", "drama": "tape", "quote": "quote"}
     order = sorted(range(n), key=lambda i: (-notes[i].weight, times[i]))
-    for i in order:
-        note = notes[i]
-        if not free(i) or note.weight < 2 or note.kind not in accent_for:
-            continue
-        if note.weight == 2 and note.kind not in {"drama", "quote", "term"}:
-            continue
-        n_words = len(texts[i].split())
-        key = _key_for(texts[i], note.key)
-        candidates = [accent_for[note.kind]]
-        if note.kind == "concept":
-            candidates.append("underline")
-        for style in candidates:
-            fits = {
-                "oval": n_words <= MAX_WORDS["oval"],
-                "underline": n_words <= MAX_WORDS["underline"] and bool(key),
-                "tape": n_words <= MAX_WORDS["tape"] and bool(key),
-                "quote": 2 <= n_words <= MAX_WORDS["quote"],
-            }[style]
-            if fits and clear(i, style):
-                styles[i] = style
-                emphasis[i] = key if style == "underline" else ""
-                break
+    if decorative_enabled:
+        for i in order:
+            note = notes[i]
+            if not free(i) or note.weight < 2 or note.kind not in accent_for:
+                continue
+            if note.weight == 2 and note.kind not in {"drama", "quote", "term"}:
+                continue
+            n_words = len(texts[i].split())
+            key = _key_for(texts[i], note.key)
+            candidates = [accent_for[note.kind]]
+            if note.kind == "concept":
+                candidates.append("underline")
+            for style in candidates:
+                fits = {
+                    "oval": n_words <= MAX_WORDS["oval"],
+                    "underline": n_words <= MAX_WORDS["underline"] and bool(key),
+                    "tape": n_words <= MAX_WORDS["tape"] and bool(key),
+                    "quote": 2 <= n_words <= MAX_WORDS["quote"],
+                }[style]
+                if fits and clear(i, style):
+                    styles[i] = style
+                    emphasis[i] = key if style == "underline" else ""
+                    break
 
     # 4. Serif payoffs.
     for i in order:
@@ -651,20 +657,21 @@ def assign_styles(
         content = [t for t in texts[i].split() if norm_token(t) not in FILLER]
         return (notes[i].weight, len(content), -times[i])
 
-    for style, limit in (("oval", MAX_WORDS["oval"]), ("underline", MAX_WORDS["underline"])):
-        if any(styles[i] == style for i in hook_window):
-            continue
-        for i in sorted(hook_window, key=hook_rank, reverse=True):
-            if not free(i) or notes[i].weight < 1:
+    if decorative_enabled:
+        for style, limit in (("oval", MAX_WORDS["oval"]), ("underline", MAX_WORDS["underline"])):
+            if any(styles[i] == style for i in hook_window):
                 continue
-            key = _key_for(texts[i], notes[i].key) or _content_word(texts[i].split())
-            if len(texts[i].split()) > limit or len(norm_token(key)) < 4:
-                continue
-            if not clear(i, style):
-                continue
-            styles[i] = style
-            emphasis[i] = key if style == "underline" else ""
-            break
+            for i in sorted(hook_window, key=hook_rank, reverse=True):
+                if not free(i) or notes[i].weight < 1:
+                    continue
+                key = _key_for(texts[i], notes[i].key) or _content_word(texts[i].split())
+                if len(texts[i].split()) > limit or len(norm_token(key)) < 4:
+                    continue
+                if not clear(i, style):
+                    continue
+                styles[i] = style
+                emphasis[i] = key if style == "underline" else ""
+                break
 
     # 5. Fill to the reel's rhythm: the judged lines are often too few for the
     #    look, so the strongest free lines take the remaining slots.
@@ -674,11 +681,15 @@ def assign_styles(
         content = [t for t in texts[i].split() if norm_token(t) not in FILLER]
         return (notes[i].weight, len(content), -times[i])
 
-    for style, target, limit in (
-        ("oval", round(seconds / 26), MAX_WORDS["oval"]),
-        ("underline", round(seconds / 20), MAX_WORDS["underline"]),
-        ("serif", round(seconds / 7), MAX_WORDS["serif"]),
-    ):
+    fill_targets = (
+        [
+            ("oval", round(seconds / 26), MAX_WORDS["oval"]),
+            ("underline", round(seconds / 20), MAX_WORDS["underline"]),
+        ]
+        if decorative_enabled
+        else []
+    ) + [("serif", round(seconds / 7), MAX_WORDS["serif"])]
+    for style, target, limit in fill_targets:
         have = sum(1 for s in styles if s == style)
         for i in sorted(range(n), key=rank, reverse=True):
             if have >= target:

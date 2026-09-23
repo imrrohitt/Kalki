@@ -372,6 +372,18 @@ def test_videos_query_param_caption_style(tmp_path, monkeypatch):
         assert status["caption_style"] == "premium"
 
         with video.open("rb") as f:
+            editorial = client.post(
+                "/api/v1/videos?caption_style=editorial",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert editorial.status_code == 200
+        body = editorial.json()
+        assert body["caption_style"] == "editorial"
+        job = job_store.get(body["job_id"])
+        assert job is not None
+        assert job.caption_style == "editorial"
+
+        with video.open("rb") as f:
             bad = client.post(
                 "/api/v1/videos?caption_style=bogus",
                 files={"file": ("clip.mp4", f, "video/mp4")},

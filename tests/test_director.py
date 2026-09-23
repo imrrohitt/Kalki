@@ -125,6 +125,65 @@ def test_assign_styles_builds_rhythm_from_notes():
     assert styles["I faced a lot of"] == "plain"
 
 
+def test_assign_styles_editorial_suppresses_decorations_but_keeps_serif_and_mix():
+    """The editorial theme is a deliberately clean, undecorated look — no
+    hand-drawn oval/underline/tape/quote or colored chip — while the plain
+    serif payoff and cream-word rhythm (which the renderer re-styles as
+    italic for this theme) still fire exactly as in classic."""
+    text = [
+        "I recently switched",
+        "to senior AI engineer",
+        "When I started",
+        "giving interviews",
+        "I faced a lot of",
+        "rejections",
+        "I didn't have",
+        "the core depth",
+        "and got the role",
+    ]
+    words = _words(" ".join(text), step=1.0)
+    drafts, cursor = [], 0
+    for line in text:
+        n = len(line.split())
+        drafts.append(CaptionDraft(first=cursor, last=cursor + n - 1, text=line))
+        cursor += n
+    notes = [
+        LineNote("switched", 2, "payoff"),
+        LineNote("AI", 1, "term"),
+        LineNote("", 0),
+        LineNote("interviews", 1),
+        LineNote("", 0),
+        LineNote("rejections", 3, "drama"),
+        LineNote("", 0),
+        LineNote("core depth", 3, "concept"),
+        LineNote("role", 3, "payoff"),
+    ]
+    out = assign_styles(drafts, notes, words, caption_style="editorial")
+    styles = {d.style for d in out}
+    assert styles <= {"plain", "mix", "serif", "stack", "bubble"}
+    assert "oval" not in styles and "underline" not in styles
+    assert "tape" not in styles and "chip" not in styles and "quote" not in styles
+    # The payoff/concept lines still get *some* emphasis — just re-expressed
+    # through the undecorated vocabulary instead of dropped entirely.
+    assert {d.text: d.style for d in out}["the core depth"] != "plain"
+
+
+def test_assign_styles_editorial_still_allows_cta_bubble():
+    """Editorial keeps the same CTA bubble as premium — it's the one
+    decoration the reference look still carries."""
+    text = ["thanks for watching", "please follow for more"]
+    words = _words(" ".join(text), step=1.0)
+    drafts = [
+        CaptionDraft(first=0, last=2, text="thanks for watching"),
+        CaptionDraft(first=3, last=6, text="please follow for more"),
+    ]
+    notes = [LineNote(), LineNote(cta=True)]
+    out_editorial = assign_styles(drafts, notes, words, caption_style="editorial")
+    assert out_editorial[1].style == "bubble"
+    out_classic = assign_styles(drafts, notes, words, caption_style="classic")
+    assert out_classic[1].style != "bubble"
+
+
 def test_drafts_to_timeline_reveals_whole_line_quickly():
     words = _words("when I started giving interviews", step=0.5)
     drafts = [CaptionDraft(first=0, last=4, text="When I started giving interviews", style="plain")]

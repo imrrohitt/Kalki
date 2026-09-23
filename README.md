@@ -107,7 +107,11 @@ Everything above is the **full-frame** path — the default. There's also an old
 | `underline` | Hairline rule + sparkle | A concrete key term |
 | `tape` | Dark serif on a torn sage sticker | One dramatic word |
 | `chip` | Colored rounded pill (navy / terracotta / forest, rotating) | A specific figure, a genuine surprise/excited line, or a real vocal-loudness spike |
-| `bubble` | Black rounded pill + star sparkle (`caption_style=premium` only) | A direct follow/subscribe/comment ask |
+| `bubble` | Black rounded pill + star sparkle (`caption_style=premium`/`editorial` only) | A direct follow/subscribe/comment ask |
+
+`mix`'s emphasis word renders in an italic serif instead, and `oval`/`underline`/`tape`/
+`chip`/`quote` never fire at all, under `caption_style=editorial` — see
+[below](#editorial-caption-style).
 
 **Mood → motion.** A line the annotate pass reads as `surprise` or `excited` — or one
 the speaker's own voice gets genuinely louder on — pops in with a quick scale-bounce
@@ -165,6 +169,33 @@ curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?caption_style=prem
   <a href="docs/samples/premium-marker-preview-12s.mp4"><strong>▶ Hand-marker font</strong></a>
   &nbsp;·&nbsp;
   <a href="docs/samples/premium-bubble-preview-8s.mp4"><strong>▶ CTA bubble</strong></a>
+</p>
+
+### Editorial caption style
+
+`?caption_style=editorial` on `POST /videos` is a different theme entirely — a clean,
+undecorated "creator commentary" look (no ovals/underlines/tape/chips), built from a
+specific reference reel:
+
+| Feature | Look | Fires on |
+| --- | --- | --- |
+| Italic emphasis | The line's key word in a genuine italic cream serif (not a filter tilt), the rest in white sans — can land anywhere in the line | The same word the classic theme would pick for `mix` |
+| Typewriter reveal | Each word snaps in fully formed the instant it's spoken — no rise/slide — with a blinking text cursor trailing the latest word | Every `plain`/`mix`/`underline` line (whole-line `serif` statements keep their soft fade) |
+| `bubble` | The same black CTA pill as premium | A direct follow/subscribe/comment ask |
+
+Decorative treatments (oval/underline/tape/chip) never fire in this theme — the look
+stays deliberately minimal. Mood-driven pop moments (a real surprise/excited beat)
+still "blink" in, and since there's no oval/underline/tape to hang a sound on, those
+moments get a light shimmer of their own so the reel doesn't go quiet after the hook.
+
+```bash
+curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?caption_style=editorial"
+```
+
+<p align="center">
+  <a href="docs/samples/editorial-typewriter-preview-10s.mp4"><strong>▶ Typewriter reveal</strong></a>
+  &nbsp;·&nbsp;
+  <a href="docs/samples/editorial-bubble-preview-8s.mp4"><strong>▶ CTA bubble</strong></a>
 </p>
 
 ## Sound
@@ -243,11 +274,13 @@ to the MP4 — so an edit can be inspected, or hand-tuned, without calling the L
 python scripts/run_pipeline.py talk.mp4 storage/my_run
 ```
 
-Pass `classic`/`premium` as the 6th argument (after theme, split, and an optional
-reference transcript) to try the [premium caption style](#premium-caption-style):
+Pass `classic`/`premium`/`editorial` as the 6th argument (after theme, split, and an
+optional reference transcript) to try the [premium](#premium-caption-style) or
+[editorial](#editorial-caption-style) caption style:
 
 ```bash
 python scripts/run_pipeline.py talk.mp4 storage/my_run "" false "" premium
+python scripts/run_pipeline.py talk.mp4 storage/my_run "" false "" editorial
 ```
 
 Pass a 4th argument pointing at a `.md`/`.txt` transcript to use it as ground truth
@@ -260,6 +293,7 @@ accurate script and just want Whisper's word-level alignment.
 | --- | --- | --- |
 | `POST` | `/api/v1/videos` | Talking-head reel. Full-frame caption director by default. |
 | `POST` | `/api/v1/videos?caption_style=premium` | Same director, plus CTA bubble / hand-marker font / chest placement — see [above](#premium-caption-style). |
+| `POST` | `/api/v1/videos?caption_style=editorial` | Clean, undecorated look — italic emphasis, typewriter reveal, CTA bubble — see [above](#editorial-caption-style). |
 | `POST` | `/api/v1/videos?split_screen=true` | The older split-canvas layout (see below). |
 | `POST` | `/api/v1/reels?theme=` | Audio-only → full-canvas motion reel. |
 | `GET` | `/api/v1/jobs/{job_id}` | Status, stage, progress, `job_dir`, `output_path`. |
