@@ -50,6 +50,12 @@ HAIRLINE = (240, 238, 232)
 BRIGHT_INK = (26, 24, 22)
 BRIGHT_GOLD = (120, 84, 18)
 BRIGHT_HAIRLINE = (46, 42, 36)
+# The editorial theme's accent family — a clean, light mint-green swapped in
+# for the usual cream/gold, on a dark or bright background respectively. Body
+# text stays plain white/ink either way; only the emphasis word, the cursor
+# that follows it, and the CTA bubble's outline pick up the green.
+EDITORIAL_GREEN = (176, 255, 196)
+EDITORIAL_GREEN_BRIGHT = (18, 92, 48)
 # Mean band luminance (0-255) above which a caption is judged to sit on a
 # bright background.
 BRIGHT_LUMA_THRESHOLD = 150.0
@@ -518,7 +524,11 @@ class CaptionLayer:
 
     def _palette_for(self, bright: bool) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
         """(body, accent, hairline) — the dark set on a bright wall or sky,
-        the usual cream-and-white set otherwise."""
+        the usual cream-and-white set otherwise. Editorial swaps the accent
+        for its clean light-green family; body text stays plain white/ink."""
+        if self.caption_style == "editorial":
+            accent = EDITORIAL_GREEN_BRIGHT if bright else EDITORIAL_GREEN
+            return (BRIGHT_INK if bright else WHITE), accent, accent
         if bright:
             return BRIGHT_INK, BRIGHT_GOLD, BRIGHT_HAIRLINE
         return WHITE, CREAM, HAIRLINE
@@ -1094,8 +1104,9 @@ class CaptionLayer:
         shade = np.asarray(fill_small.filter(ImageFilter.GaussianBlur(11 * u)), np.float32) / 255.0
         shade = np.roll(shade, max(1, int(6 * u)), axis=0)
         arr = np.zeros((H, W, 4), np.float32)
+        outline_color = EDITORIAL_GREEN if self.caption_style == "editorial" else BUBBLE_OUTLINE
         fill_col = np.array(BUBBLE_FILL, np.float32) / 255.0
-        line_col = np.array(BUBBLE_OUTLINE, np.float32) / 255.0
+        line_col = np.array(outline_color, np.float32) / 255.0
         arr[..., :3] = fill_col[None, None, :] * fm[..., None]
         arr[..., 3] = fm + (shade * 0.34 * self.shadow) * (1.0 - fm)
         # Outline drawn over the fill, premultiplied-over.
@@ -1109,7 +1120,7 @@ class CaptionLayer:
                 arr=arr, x=int(cx - W / 2), y=int(cy - H / 2),
             )
         ]
-        star = _star5(max(7, int(15 * u)), BUBBLE_OUTLINE)
+        star = _star5(max(7, int(15 * u)), outline_color)
         pops = [_scaled(star, s) for s in (0.2, 0.6, 1.05, 0.85, 1.0)]
         sx = cx - w / 2 + pad_x * 0.30
         sy = cy - h / 2 + pad_y * 0.30

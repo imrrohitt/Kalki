@@ -4,7 +4,7 @@ import numpy as np
 
 from app.captions.models import Caption, CaptionTimeline, CaptionWord
 from app.editorial.models import SfxHit
-from app.renderer.caption_layer import BRIGHT_INK, WHITE, CaptionLayer
+from app.renderer.caption_layer import BRIGHT_INK, CREAM, WHITE, CaptionLayer
 from app.renderer.soundtrack import build_soundtrack, plan_accents, synthesize_music_bed
 
 
@@ -242,6 +242,25 @@ def test_editorial_style_italicizes_the_emphasis_word():
     band_classic = classic.frame_rgba(1.8)
     band_editorial = editorial.frame_rgba(1.8)
     assert band_classic[..., 3].sum() != band_editorial[..., 3].sum()
+
+
+def test_editorial_style_uses_a_light_green_accent_not_cream():
+    """The editorial theme's accent color is a clean light green, distinct
+    from classic/premium's cream — body text (white) is unaffected."""
+    cap = _cap(0.0, 2.0, "I am making the biggest mistake", "mix", emphasis=("biggest",))
+    timeline = CaptionTimeline(captions=[cap])
+    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640, caption_style="editorial")
+    band = layer.frame_rgba(1.8)
+    # Sample fully-opaque ink pixels only, split by hue: green channel
+    # dominance marks the accent word, near-equal RGB marks white body text.
+    mask = band[..., 3] > 250
+    pixels = band[mask][:, :3].astype(int)
+    greenish = pixels[(pixels[:, 1] > pixels[:, 0] + 15) & (pixels[:, 1] > pixels[:, 2] + 15)]
+    assert len(greenish) > 0
+    avg = greenish.mean(axis=0)
+    assert avg[1] > avg[0] and avg[1] > avg[2]  # green channel leads red and blue
+    # And it must not just be classic's cream flipped through a bug.
+    assert tuple(int(v) for v in avg) != CREAM
 
 
 def test_editorial_style_never_uses_premium_variety():

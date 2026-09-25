@@ -179,7 +179,7 @@ specific reference reel:
 
 | Feature | Look | Fires on |
 | --- | --- | --- |
-| Italic emphasis | The line's key word in a genuine italic cream serif (not a filter tilt), the rest in white sans — can land anywhere in the line | The same word the classic theme would pick for `mix` |
+| Italic emphasis | The line's key word in a genuine italic light-green serif (not a filter tilt), the rest in white sans — can land anywhere in the line | The same word the classic theme would pick for `mix` |
 | Typewriter reveal | Each word snaps in fully formed the instant it's spoken — no rise/slide — with a blinking text cursor trailing the latest word | Every `plain`/`mix`/`underline` line (whole-line `serif` statements keep their soft fade) |
 | `bubble` | The same black CTA pill as premium | A direct follow/subscribe/comment ask |
 
