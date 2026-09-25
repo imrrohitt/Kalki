@@ -50,12 +50,13 @@ HAIRLINE = (240, 238, 232)
 BRIGHT_INK = (26, 24, 22)
 BRIGHT_GOLD = (120, 84, 18)
 BRIGHT_HAIRLINE = (46, 42, 36)
-# The editorial theme's accent family — a clean, light mint-green swapped in
-# for the usual cream/gold, on a dark or bright background respectively. Body
-# text stays plain white/ink either way; only the emphasis word, the cursor
-# that follows it, and the CTA bubble's outline pick up the green.
-EDITORIAL_GREEN = (176, 255, 196)
-EDITORIAL_GREEN_BRIGHT = (18, 92, 48)
+# The editorial theme's accent family — a direct, saturated green (not a
+# pale mint) swapped in for the usual cream/gold, on a dark or bright
+# background respectively. Body text stays plain white/ink either way; only
+# the emphasis word, the cursor that follows it, and the CTA bubble's
+# outline pick up the green.
+EDITORIAL_GREEN = (34, 220, 110)
+EDITORIAL_GREEN_BRIGHT = (10, 120, 58)
 # Mean band luminance (0-255) above which a caption is judged to sit on a
 # bright background.
 BRIGHT_LUMA_THRESHOLD = 150.0
