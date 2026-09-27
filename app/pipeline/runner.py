@@ -380,6 +380,7 @@ class Pipeline:
             music_mood=brief_mood,
             video_duration=duration,
             caption_style=job.caption_style,
+            caption_position=job.caption_position,
         )
         job.metrics["render_time_ms"] = int((time.perf_counter() - t_render) * 1000)
         logger.info("[%s] render done (%.1fs)", jid, time.perf_counter() - t_render)

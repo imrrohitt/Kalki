@@ -328,6 +328,7 @@ class CaptionLayer:
         bg_luma_times: list[float] | None = None,
         bg_luma_values: list[float] | None = None,
         caption_style: str = "classic",
+        caption_position: str = "head",
     ) -> None:
         self.width = width
         self.height = height
@@ -344,13 +345,23 @@ class CaptionLayer:
         self._luma_times = np.asarray(bg_luma_times, np.float32) if bg_luma_times else None
         self._luma_values = np.asarray(bg_luma_values, np.float32) if bg_luma_values else None
         self.captions: list[Caption] = sorted(timeline.captions, key=lambda c: c.start)
+        self.caption_position = caption_position
         u = self.u
-        head = head_top if head_top else int(height * 0.30)
-        baseline = head - int(165 * u)
-        baseline = max(int(height * 0.12), min(baseline, int(height * 0.25)))
-        baseline = max(baseline, int(250 * u))
-        top = max(0, baseline - int(250 * u))
-        bottom = min(height, baseline + int(190 * u))
+        if caption_position == "bottom":
+            # Tutorial mode: a fixed subtitle-style band near the bottom of
+            # the frame, independent of head geometry — the top of the
+            # screen is often busy with a screen recording or diagram, so
+            # captions read from the same safe strip every time instead.
+            baseline = int(height * 0.80)
+            top = max(0, baseline - int(250 * u))
+            bottom = min(height, baseline + int(190 * u))
+        else:
+            head = head_top if head_top else int(height * 0.30)
+            baseline = head - int(165 * u)
+            baseline = max(int(height * 0.12), min(baseline, int(height * 0.25)))
+            baseline = max(baseline, int(250 * u))
+            top = max(0, baseline - int(250 * u))
+            bottom = min(height, baseline + int(190 * u))
 
         # Premium theme only: an occasional line sits below the face — on the
         # chest/upper-torso area — instead of always above the head, so a
@@ -358,10 +369,11 @@ class CaptionLayer:
         # Only when the framing actually shows that much of the speaker (a
         # tight face-filling close-up has nowhere to put it), and only ever a
         # heuristic offset below the hairline — there is no chin/chest
-        # detector, so this is deliberately conservative.
+        # detector, so this is deliberately conservative. Never combined with
+        # the fixed bottom band — that's already a below-the-face placement.
         self.baseline_chest: int | None = None
         chest_enabled = False
-        if caption_style == "premium" and head < height * 0.46:
+        if caption_position == "head" and caption_style == "premium" and head < height * 0.46:
             chest_y = int(head + 460 * u)
             if chest_y + int(170 * u) < height * 0.94:
                 chest_enabled = True

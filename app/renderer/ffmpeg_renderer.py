@@ -263,6 +263,7 @@ class FFmpegRenderer:
         music_mood: str = "warm_inspiring",
         video_duration: float = 0.0,
         caption_style: str = "classic",
+        caption_position: str = "head",
     ) -> str:
         """Full-frame talking head with the premium caption layer and soundtrack."""
         import tempfile
@@ -285,7 +286,11 @@ class FFmpegRenderer:
         if info.fps and info.fps > 0:
             fps = int(min(round(info.fps), settings.overlay_max_fps))
         fps = max(fps, 24)
-        head_top = detect_head_top(source_video, width=out_w, height=out_h)
+        # A fixed bottom band doesn't need head geometry at all — skip the
+        # extra decode pass that detects it.
+        head_top = None if caption_position == "bottom" else detect_head_top(
+            source_video, width=out_w, height=out_h
+        )
         layer = CaptionLayer(
             caption_timeline,
             width=out_w,
@@ -293,6 +298,7 @@ class FFmpegRenderer:
             fps=fps,
             head_top=head_top,
             caption_style=caption_style,
+            caption_position=caption_position,
         )
         # Real per-moment background intelligence: one cheap low-res decode of
         # the whole reel gives every caption its own bright/dark read, instead
@@ -314,6 +320,7 @@ class FFmpegRenderer:
             bg_luma_times=luma_times,
             bg_luma_values=luma_values,
             caption_style=caption_style,
+            caption_position=caption_position,
         )
         n_frames = int(math.ceil(duration * fps))
 

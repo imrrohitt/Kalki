@@ -3,11 +3,12 @@
 Full-frame (default): transcribe -> caption director -> premium captions + soundtrack.
 Split: transcribe -> editorial -> captions -> graphics -> render.
 
-Usage: python scripts/run_pipeline.py <source_video> [out_dir] [theme] [split] [reference.md] [caption_style]
+Usage: python scripts/run_pipeline.py <source_video> [out_dir] [theme] [split] [reference.md] [caption_style] [caption_position]
 Themes: paper (default) | noir | tech | ivory  (split layout only)
 split: false (default) | true
 reference.md: optional creator transcript/translation used as ground truth for meaning
 caption_style: classic (default) | premium | editorial  (full-frame only)
+caption_position: head (default) | bottom  (full-frame only)
 """
 
 from __future__ import annotations
@@ -74,6 +75,7 @@ async def main() -> None:
     if not split_layout:
         reference = Path(sys.argv[5]).read_text(encoding="utf-8") if len(sys.argv) > 5 else ""
         caption_style = sys.argv[6] if len(sys.argv) > 6 else "classic"
+        caption_position = sys.argv[7] if len(sys.argv) > 7 else "head"
         result = await CaptionDirector().direct(
             transcript,
             video_duration=info.duration,
@@ -101,6 +103,7 @@ async def main() -> None:
             music_mood=result.brief.music_mood,
             video_duration=info.duration,
             caption_style=caption_style,
+            caption_position=caption_position,
         )
         log.info("rendered in %.1fs", time.perf_counter() - t_render)
         audio.unlink(missing_ok=True)

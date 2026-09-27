@@ -244,6 +244,48 @@ def test_editorial_style_italicizes_the_emphasis_word():
     assert band_classic[..., 3].sum() != band_editorial[..., 3].sum()
 
 
+def test_bottom_caption_position_sits_in_the_lower_frame_with_safe_margin():
+    """Tutorial mode: a fixed subtitle-style band near the bottom, regardless
+    of head geometry, with real clearance below it for platform UI."""
+    caps = [_cap(i * 4.0, i * 4.0 + 3.0, "click the settings icon", "plain") for i in range(3)]
+    tl = CaptionTimeline(captions=caps)
+    for w, h in ((1080, 1920), (1080, 2400), (950, 2112)):
+        layer = CaptionLayer(
+            tl, width=w, height=h, head_top=int(h * 0.30), caption_position="bottom"
+        )
+        bottom_edge = layer.band_top + layer.band_height
+        assert layer.band_top > h * 0.55  # sits in the lower half, not mid-frame
+        assert (h - bottom_edge) / h >= 0.08  # real clearance for platform UI
+
+
+def test_bottom_caption_position_ignores_head_geometry():
+    """A wildly different head_top must not move the bottom band — that's
+    the whole point of a fixed tutorial-mode strip."""
+    cap = _cap(0.0, 2.0, "hello", "plain")
+    tl = CaptionTimeline(captions=[cap])
+    low_head = CaptionLayer(tl, width=1080, height=1920, head_top=int(1920 * 0.20), caption_position="bottom")
+    high_head = CaptionLayer(tl, width=1080, height=1920, head_top=int(1920 * 0.60), caption_position="bottom")
+    assert low_head.band_top == high_head.band_top
+    assert low_head.baseline == high_head.baseline
+
+
+def test_bottom_caption_position_disables_premium_chest_placement():
+    """Chest rotation and the fixed bottom band are two different answers to
+    the same problem — never combine them."""
+    caps = [_cap(i * 4.0, i * 4.0 + 3.0, f"caption number {i}", "plain") for i in range(8)]
+    tl = CaptionTimeline(captions=caps)
+    layer = CaptionLayer(
+        tl,
+        width=1080,
+        height=1920,
+        head_top=int(1920 * 0.22),
+        caption_style="premium",
+        caption_position="bottom",
+    )
+    assert layer.baseline_chest is None
+    assert all(c.screen_area == "head" for c in layer.captions)
+
+
 def test_editorial_style_uses_a_light_green_accent_not_cream():
     """The editorial theme's accent color is a clean light green, distinct
     from classic/premium's cream — body text (white) is unaffected."""

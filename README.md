@@ -198,6 +198,24 @@ curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?caption_style=edit
   <a href="docs/samples/editorial-bubble-preview-8s.mp4"><strong>▶ CTA bubble</strong></a>
 </p>
 
+### Caption position
+
+`?caption_position=bottom` on `POST /videos` moves the whole caption band to a fixed
+subtitle-style strip near the bottom of the frame instead of above the speaker's head
+— built for tutorial/screen-recording content where the top of the frame is already
+busy with a diagram or a recorded screen. It's independent of `caption_style` (works
+with classic/premium/editorial) and independent of head geometry — always the same
+safe strip, with real clearance below it for each platform's own UI. Premium's
+occasional chest placement is disabled in this mode (they answer the same problem).
+
+```bash
+curl -F "file=@talk.mp4" "http://127.0.0.1:8000/api/v1/videos?caption_position=bottom"
+```
+
+<p align="center">
+  <a href="docs/samples/bottom-position-preview-10s.mp4"><strong>▶ Bottom position</strong></a>
+</p>
+
 ## Sound
 
 - **Music** — a licensed track in `MUSIC_DIR` wins (mood words in the filename help
@@ -276,11 +294,13 @@ python scripts/run_pipeline.py talk.mp4 storage/my_run
 
 Pass `classic`/`premium`/`editorial` as the 6th argument (after theme, split, and an
 optional reference transcript) to try the [premium](#premium-caption-style) or
-[editorial](#editorial-caption-style) caption style:
+[editorial](#editorial-caption-style) caption style, and `head`/`bottom` as the 7th
+for [caption position](#caption-position):
 
 ```bash
 python scripts/run_pipeline.py talk.mp4 storage/my_run "" false "" premium
 python scripts/run_pipeline.py talk.mp4 storage/my_run "" false "" editorial
+python scripts/run_pipeline.py talk.mp4 storage/my_run "" false "" classic bottom
 ```
 
 Pass a 4th argument pointing at a `.md`/`.txt` transcript to use it as ground truth
@@ -294,6 +314,7 @@ accurate script and just want Whisper's word-level alignment.
 | `POST` | `/api/v1/videos` | Talking-head reel. Full-frame caption director by default. |
 | `POST` | `/api/v1/videos?caption_style=premium` | Same director, plus CTA bubble / hand-marker font / chest placement — see [above](#premium-caption-style). |
 | `POST` | `/api/v1/videos?caption_style=editorial` | Clean, undecorated look — italic emphasis, typewriter reveal, CTA bubble — see [above](#editorial-caption-style). |
+| `POST` | `/api/v1/videos?caption_position=bottom` | Fixed subtitle strip near the bottom instead of above the head — see [above](#caption-position). |
 | `POST` | `/api/v1/videos?split_screen=true` | The older split-canvas layout (see below). |
 | `POST` | `/api/v1/reels?theme=` | Audio-only → full-canvas motion reel. |
 | `GET` | `/api/v1/jobs/{job_id}` | Status, stage, progress, `job_dir`, `output_path`. |

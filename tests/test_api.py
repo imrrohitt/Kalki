@@ -391,6 +391,51 @@ def test_videos_query_param_caption_style(tmp_path, monkeypatch):
         assert bad.status_code == 400
 
 
+def test_videos_query_param_caption_position(tmp_path, monkeypatch):
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
+    from app.config import Settings
+
+    test_settings = Settings(storage_dir=str(tmp_path / "storage"))
+    monkeypatch.setattr("app.config.settings", test_settings)
+    monkeypatch.setattr("app.api.routes.settings", test_settings)
+    routes._pipeline = MagicMock()
+    routes._pipeline.run = AsyncMock()
+    app = create_app()
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not-a-real-video")
+
+    with TestClient(app) as client:
+        with video.open("rb") as f:
+            default = client.post(
+                "/api/v1/videos",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert default.status_code == 200
+        assert default.json()["caption_position"] == "head"
+
+        with video.open("rb") as f:
+            bottom = client.post(
+                "/api/v1/videos?caption_position=bottom",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert bottom.status_code == 200
+        body = bottom.json()
+        assert body["caption_position"] == "bottom"
+        job = job_store.get(body["job_id"])
+        assert job is not None
+        assert job.caption_position == "bottom"
+
+        status = client.get(f"/api/v1/jobs/{body['job_id']}").json()
+        assert status["caption_position"] == "bottom"
+
+        with video.open("rb") as f:
+            bad = client.post(
+                "/api/v1/videos?caption_position=bogus",
+                files={"file": ("clip.mp4", f, "video/mp4")},
+            )
+        assert bad.status_code == 400
+
+
 def test_videos_accepts_markdown_transcript_and_skips_whisper(tmp_path, monkeypatch):
     monkeypatch.setenv("STORAGE_DIR", str(tmp_path / "storage"))
     from app.config import Settings

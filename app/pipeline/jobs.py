@@ -58,6 +58,11 @@ class Job:
     # words, a typewriter word-by-word reveal with a blinking cursor, and the
     # same CTA bubble as premium — no ovals/underlines/tape/chips.
     caption_style: str = "classic"
+    # Full-frame talking-head reels only. "head" (default) is the existing
+    # above-the-head placement. "bottom" is a fixed subtitle-style band near
+    # the bottom of the frame — for tutorial/screen-recording content where
+    # the top of the screen is already busy.
+    caption_position: str = "head"
     status: JobStatus = JobStatus.uploaded
     stage: str = JobStatus.uploaded.value
     progress: int = 5
@@ -109,6 +114,7 @@ class Job:
             "edit_plan_path": self.edit_plan_path,
             "skip_stt": self.skip_stt,
             "caption_style": self.caption_style,
+            "caption_position": self.caption_position,
             "metrics": self.metrics,
         }
 
@@ -132,6 +138,7 @@ class Job:
             edit_plan_path=data.get("edit_plan_path"),
             skip_stt=bool(data.get("skip_stt", False)),
             caption_style=data.get("caption_style", "classic"),
+            caption_position=data.get("caption_position", "head"),
             metrics=dict(data.get("metrics") or {}),
         )
 
