@@ -4,7 +4,7 @@ import numpy as np
 
 from app.captions.models import Caption, CaptionTimeline, CaptionWord
 from app.editorial.models import SfxHit
-from app.renderer.caption_layer import BRIGHT_INK, CREAM, WHITE, CaptionLayer
+from app.renderer.caption_layer import CREAM, WHITE, CaptionLayer
 from app.renderer.soundtrack import build_soundtrack, plan_accents, synthesize_music_bed
 
 
@@ -53,14 +53,15 @@ def test_caption_layer_draws_every_treatment_above_the_head():
 
 
 def test_caption_layer_frames_are_empty_between_captions_and_reuse_static_frames():
-    timeline = CaptionTimeline(captions=[_cap(1.0, 2.0, "hello there", "plain")])
+    # Past the opening hook, which deliberately animates (stars/bubbles).
+    timeline = CaptionTimeline(captions=[_cap(8.0, 9.0, "hello there", "plain")])
     layer = CaptionLayer(timeline, width=540, height=960, fps=10, head_top=320)
-    frames = list(layer.iter_frames(30))
-    assert len(frames) == 30
+    frames = list(layer.iter_frames(100))
+    assert len(frames) == 100
     assert not any(frames[0])
-    assert any(frames[15])
-    assert frames[18] is frames[19]
-    assert not any(frames[25])
+    assert any(frames[85])
+    assert frames[87] is frames[88]
+    assert not any(frames[95])
 
 
 def test_accents_are_sparse_and_never_per_word():
@@ -90,22 +91,22 @@ def test_bubble_treatment_gets_its_own_pop_cue():
 
 def test_pop_mood_uses_frames_reveal_not_rise():
     """A surprise/excited caption 'blinks' in (scale-bounce) instead of rising."""
-    plain = CaptionTimeline(captions=[_cap(0.0, 1.5, "an ordinary line", "plain")])
+    plain = CaptionTimeline(captions=[_cap(8.0, 9.5, "an ordinary line", "plain")])
     excited = CaptionTimeline(
-        captions=[_cap(0.0, 1.5, "you won't believe", "serif", mood="excited")]
+        captions=[_cap(8.0, 9.5, "you won't believe", "serif", mood="excited")]
     )
-    modes_plain = {e.mode for e, _, _ in CaptionLayer(plain, width=1080, height=1920, head_top=640)._states(0.3, 0)}
-    modes_pop = {e.mode for e, _, _ in CaptionLayer(excited, width=1080, height=1920, head_top=640)._states(0.3, 0)}
+    modes_plain = {e.mode for e, _, _ in CaptionLayer(plain, width=1080, height=1920, head_top=640)._states(8.3, 0)}
+    modes_pop = {e.mode for e, _, _ in CaptionLayer(excited, width=1080, height=1920, head_top=640)._states(8.3, 0)}
     assert modes_plain == {"rise"}
     assert "frames" in modes_pop and "rise" not in modes_pop
 
 
 def test_pop_only_touches_emphasis_word_in_an_ordinary_line():
     timeline = CaptionTimeline(
-        captions=[_cap(0.0, 2.0, "we got surprising results", "mix", ("surprising",), mood="surprise")]
+        captions=[_cap(8.0, 10.0, "we got surprising results", "mix", ("surprising",), mood="surprise")]
     )
     layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640)
-    els = layer._layout(timeline.captions[0], 0)
+    els = layer._layout(timeline.captions[0], 3)
     # Exactly one word (the emphasized one) pops; the rest still rise.
     assert sum(1 for e in els if e.mode == "frames") == 1
     assert sum(1 for e in els if e.mode == "rise") == 3
@@ -140,31 +141,67 @@ def test_icon_never_appears_on_a_money_chip_line():
     assert out[1].icon == "none"
 
 
-def test_caption_color_adapts_to_its_own_background_not_the_whole_video():
+def test_caption_halo_follows_its_own_background_and_is_never_black():
     """A talking head that walks from shade into open sky needs both looks in
-    the SAME render — one flat guess for the whole video would leave half the
-    captions invisible."""
+    the SAME render. Text stays light; on a bright wall the contrast comes
+    from a deep shade of the wall's own hue — never flat black ink."""
     timeline = CaptionTimeline(
         captions=[
             _cap(0.0, 1.5, "in the shade", "plain"),
-            _cap(5.0, 6.5, "core depth", "oval"),
             _cap(10.0, 11.5, "in bright sky", "plain"),
-            _cap(15.0, 16.5, "core depth", "oval"),
         ]
     )
-    # 0-8s dark background, 8s+ bright background.
     times = [float(t) for t in range(0, 20)]
     values = [40.0 if t < 8 else 220.0 for t in times]
-    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640, bg_luma_times=times, bg_luma_values=values)
+    lavender = [(225, 200, 235)] * len(times)
+    layer = CaptionLayer(
+        timeline, width=1080, height=1920, head_top=640,
+        bg_luma_times=times, bg_luma_values=values, bg_rgb_values=lavender,
+    )
+    for cap in timeline.captions:
+        band = layer.frame_rgba(min(cap.start + 0.6, cap.end - 0.15))
+        solid = band[..., 3] > 250
+        light = (band[solid][:, :3].min(axis=1) > 235).sum()
+        assert light > 200  # a light fill on both backgrounds
 
-    dark_body = _dominant_color(layer, timeline.captions[0])
-    bright_body = _dominant_color(layer, timeline.captions[2])
-    assert dark_body == WHITE
-    assert bright_body == BRIGHT_INK
+    band = layer.frame_rgba(10.9)
+    solid = band[..., 3] > 250
+    # the outline ring is a saturated deep violet, not a neutral near-black
+    deep = band[solid][:, :3].astype(int)
+    outline = deep[(deep.max(axis=1) < 140)]
+    assert len(outline) > 0
+    assert (outline.max(axis=1) - outline.min(axis=1)).mean() > 25
 
-    dark_hair = _dominant_color(layer, timeline.captions[1], hairline=True)
-    bright_hair = _dominant_color(layer, timeline.captions[3], hairline=True)
-    assert dark_hair != bright_hair  # the oval ring also flips, not just body text
+
+def test_bright_background_without_color_track_still_avoids_black():
+    timeline = CaptionTimeline(captions=[_cap(0.0, 1.5, "in bright sky", "plain")])
+    layer = CaptionLayer(timeline, width=1080, height=1920, head_top=640, bright_background=True)
+    band = layer.frame_rgba(1.2)
+    solid = band[..., 3] > 250
+    assert (band[solid][:, :3].max(axis=1) > 200).mean() > 0.3  # light fill present
+
+
+def test_multiline_caption_grows_upward_from_the_head_gap():
+    """The last line sits on the anchor; a stacked hook must not drop toward
+    the speaker's head."""
+    one = CaptionTimeline(captions=[_cap(2.0, 4.0, "and I have given", "plain")])
+    two = CaptionTimeline(captions=[_cap(2.0, 4.0, "and I have\ngiven interviews", "plain")])
+    a = CaptionLayer(one, width=1080, height=1920, head_top=700)
+    b = CaptionLayer(two, width=1080, height=1920, head_top=700)
+    fa = a.frame_rgba(3.5)[..., 3]
+    fb = b.frame_rgba(3.5)[..., 3]
+    bottom_a = np.nonzero(fa.max(axis=1) > 128)[0].max()
+    bottom_b = np.nonzero(fb.max(axis=1) > 128)[0].max()
+    assert abs(int(bottom_a) - int(bottom_b)) < 12  # same lowest ink row
+
+
+def test_hook_lines_get_stars_and_bubbles_but_later_lines_do_not():
+    hook = CaptionTimeline(captions=[_cap(0.0, 2.0, "I am a senior", "plain")])
+    late = CaptionTimeline(captions=[_cap(30.0, 32.0, "I am a senior", "plain")])
+    modes_hook = {e.mode for e in CaptionLayer(hook, width=1080, height=1920, head_top=640)._layout(hook.captions[0], 0)}
+    modes_late = {e.mode for e in CaptionLayer(late, width=1080, height=1920, head_top=640)._layout(late.captions[0], 5)}
+    assert "drift" in modes_hook and "frames" in modes_hook
+    assert "drift" not in modes_late
 
 
 def _dominant_color(layer: CaptionLayer, cap: Caption, *, hairline: bool = False):

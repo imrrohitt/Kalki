@@ -43,7 +43,11 @@ def detect_head_top(
         fallback = int(height * 0.34)
         logger.info("head-top detect failed; using y=%s", fallback)
         return fallback
-    y = int(statistics.median(tops))
+    # A speaker leans, gestures and rises while talking. Anchor to the highest
+    # head position seen (a low percentile), not the median, so captions keep
+    # their gap even when the head comes up into the caption zone.
+    tops.sort()
+    y = tops[int(0.2 * (len(tops) - 1))]
     y = max(int(height * 0.22), min(y, int(height * 0.58)))
     logger.info("head-top y=%s (from %s samples)", y, len(tops))
     return y
@@ -54,7 +58,7 @@ def _sample_times(source: str) -> list[float]:
         duration = max(probe_video(source).duration, 1.0)
     except Exception:
         duration = 8.0
-    picks = (0.12, 0.28, 0.48)
+    picks = (0.06, 0.14, 0.24, 0.34, 0.44, 0.54, 0.64, 0.76, 0.88)
     times = [round(duration * p, 2) for p in picks]
     return [t for t in times if 0.05 < t < duration - 0.05] or [0.4]
 

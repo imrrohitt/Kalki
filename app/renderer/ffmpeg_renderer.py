@@ -213,7 +213,7 @@ class FFmpegRenderer:
             w = target_w
         return w - (w % 2), h - (h % 2)
 
-    def _sample_band_luma_track(
+    def _sample_band_color_track(
         self,
         source_video: str,
         *,
@@ -223,11 +223,12 @@ class FFmpegRenderer:
         bottom: int,
         duration: float,
         sample_fps: float = 2.0,
-    ) -> tuple[list[float], list[float]]:
-        """One decode pass: mean luminance of the caption band across the
-        whole reel at a low rate, so each caption can read the background
-        under ITS OWN moment instead of one guess for the whole video — a
-        talking head walking from shade into open sky needs both."""
+    ) -> tuple[list[float], list[float], list[tuple[int, int, int]]]:
+        """One decode pass: mean color of the caption band across the whole
+        reel at a low rate, so each caption can read the background under ITS
+        OWN moment instead of one guess for the whole video — a talking head
+        walking from shade into open sky needs both, and the caption palette
+        (halo, glow, accent) is derived from the actual wall color."""
         import numpy as np
 
         small_w = 96
@@ -237,21 +238,22 @@ class FFmpegRenderer:
         band_h = y1 - y0
         cmd = [
             settings.ffmpeg_path, "-v", "error", "-i", source_video,
-            "-vf", f"fps={sample_fps},scale={small_w}:{small_h},crop={small_w}:{band_h}:0:{y0},format=gray",
-            "-f", "rawvideo", "-pix_fmt", "gray", "-",
+            "-vf", f"fps={sample_fps},scale={small_w}:{small_h},crop={small_w}:{band_h}:0:{y0},format=rgb24",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
         ]
         try:
             raw = subprocess.run(cmd, capture_output=True, timeout=60).stdout
         except subprocess.TimeoutExpired:
-            return [], []
-        frame_size = small_w * band_h
+            return [], [], []
+        frame_size = small_w * band_h * 3
         if frame_size <= 0 or len(raw) < frame_size:
-            return [], []
+            return [], [], []
         count = len(raw) // frame_size
-        arr = np.frombuffer(raw[: count * frame_size], np.uint8).reshape(count, band_h, small_w)
-        luma = arr.astype(np.float32).mean(axis=(1, 2))
+        arr = np.frombuffer(raw[: count * frame_size], np.uint8).reshape(count, band_h, small_w, 3)
+        rgb = arr.astype(np.float32).mean(axis=(1, 2))
+        luma = rgb @ np.array([0.299, 0.587, 0.114], np.float32)
         times = [i / sample_fps for i in range(count)]
-        return times, luma.tolist()
+        return times, luma.tolist(), [tuple(int(round(c)) for c in px) for px in rgb]
 
     def render_overlay_reel(
         self,
@@ -303,7 +305,7 @@ class FFmpegRenderer:
         # Real per-moment background intelligence: one cheap low-res decode of
         # the whole reel gives every caption its own bright/dark read, instead
         # of one guess for the entire video — text color adapts per caption.
-        luma_times, luma_values = self._sample_band_luma_track(
+        luma_times, luma_values, rgb_values = self._sample_band_color_track(
             source_video,
             width=out_w,
             height=out_h,
@@ -319,6 +321,7 @@ class FFmpegRenderer:
             head_top=head_top,
             bg_luma_times=luma_times,
             bg_luma_values=luma_values,
+            bg_rgb_values=rgb_values,
             caption_style=caption_style,
             caption_position=caption_position,
         )

@@ -77,12 +77,12 @@ BUBBLE_TEXT = (250, 247, 238)
 MARKER_FONT = str(FONT_DIR / "PermanentMarker-Regular.ttf")
 
 # Font sizes in px on a 1080-wide frame.
-FS_SANS = 58
-FS_SERIF_INLINE = 80
-FS_ACRONYM = 68
-FS_SERIF = 90
-FS_HOOK = 104
-FS_SUB = 56
+FS_SANS = 64
+FS_SERIF_INLINE = 88
+FS_ACRONYM = 74
+FS_SERIF = 98
+FS_HOOK = 112
+FS_SUB = 60
 FS_TAPE = 94
 FS_CHIP = 64
 FS_BUBBLE = 62
@@ -153,10 +153,21 @@ def text_sprite(
     u: float,
     shadow: float,
     stroke: int = 0,
+    shade: tuple[int, int, int] = (0, 0, 0),
+    outline: tuple[int, int, int] | None = None,
+    outline_px: int = 0,
+    glow: tuple[int, int, int] | None = None,
+    glow_strength: float = 0.0,
 ) -> TextSprite:
-    left, top, right, bottom = font.getbbox(text, anchor="ls", stroke_width=stroke)
+    """Rasterize one word with a layered halo: soft glow, tinted shadow,
+    optional outline, then the fill. With the defaults it is the original
+    plain black soft shadow, so existing looks are unchanged."""
+    reach = max(stroke, outline_px)
+    left, top, right, bottom = font.getbbox(text, anchor="ls", stroke_width=reach)
     blur = 7.0 * u
     pad = int(math.ceil(blur * 2.6 + 8 * u)) + 2
+    if glow is not None:
+        pad += int(math.ceil(10 * u))
     w = int(right - left) + 2 * pad
     h = int(bottom - top) + 2 * pad
     ox, oy = pad - left, pad - top
@@ -164,27 +175,56 @@ def text_sprite(
     ImageDraw.Draw(mask).text(
         (ox, oy), text, font=font, fill=255, anchor="ls", stroke_width=stroke, stroke_fill=255
     )
+    if outline is not None and outline_px > 0:
+        omask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(omask).text(
+            (ox, oy), text, font=font, fill=255, anchor="ls",
+            stroke_width=max(stroke, outline_px), stroke_fill=255,
+        )
+    else:
+        omask = mask
     m = np.asarray(mask, dtype=np.float32)[..., None] / 255.0
-    out = np.zeros((h, w, 4), dtype=np.float32)
+    mo = np.asarray(omask, dtype=np.float32)[..., None] / 255.0
+
+    rgb = np.zeros((h, w, 3), dtype=np.float32)
+    alpha = np.zeros((h, w, 1), dtype=np.float32)
+
+    def over(layer_rgb: np.ndarray, layer_a: np.ndarray) -> None:
+        nonlocal rgb, alpha
+        rgb = layer_rgb + rgb * (1.0 - layer_a)
+        alpha = layer_a + alpha * (1.0 - layer_a)
+
+    if glow is not None and glow_strength > 0:
+        gcol = np.array(glow, dtype=np.float32) / 255.0
+        for radius, gain in ((16 * u, 0.85), (6 * u, 0.55)):
+            g = np.asarray(omask.filter(ImageFilter.GaussianBlur(radius)), np.float32)[..., None] / 255.0
+            ga = np.clip(g * 1.4 * gain * glow_strength, 0.0, 1.0)
+            over(gcol * ga, ga)
     if shadow > 0:
-        wide = np.asarray(mask.filter(ImageFilter.GaussianBlur(blur)), np.float32) / 255.0
+        scol = np.array(shade, dtype=np.float32) / 255.0
+        wide = np.asarray(omask.filter(ImageFilter.GaussianBlur(blur)), np.float32) / 255.0
         tight = np.asarray(
-            mask.filter(ImageFilter.GaussianBlur(max(1.0, 1.7 * u))), np.float32
+            omask.filter(ImageFilter.GaussianBlur(max(1.0, 1.7 * u))), np.float32
         ) / 255.0
         wide = np.roll(wide, max(1, round(3 * u)), axis=0)
         tight = np.roll(tight, max(1, round(1.4 * u)), axis=0)
-        alpha = 1.0 - (1.0 - np.clip(wide * 0.52 * shadow, 0, 1)) * (
+        sa = 1.0 - (1.0 - np.clip(wide * 0.52 * shadow, 0, 1)) * (
             1.0 - np.clip(tight * 0.38 * shadow, 0, 1)
         )
         if shadow > 1.15:
-            glow = np.asarray(
-                mask.filter(ImageFilter.GaussianBlur(18 * u)), np.float32
+            big = np.asarray(
+                omask.filter(ImageFilter.GaussianBlur(18 * u)), np.float32
             ) / 255.0
-            alpha = 1.0 - (1.0 - alpha) * (1.0 - np.clip(glow * 0.30, 0, 1))
-        out[..., 3] = alpha
+            sa = 1.0 - (1.0 - sa) * (1.0 - np.clip(big * 0.30, 0, 1))
+        sa = sa[..., None]
+        over(scol * sa, sa)
+    if outline is not None and outline_px > 0:
+        ocol = np.array(outline, dtype=np.float32) / 255.0
+        over(ocol * mo, mo)
     col = np.array(color, dtype=np.float32) / 255.0
-    out[..., :3] = col * m + out[..., :3] * (1.0 - m)
-    out[..., 3:4] = m + out[..., 3:4] * (1.0 - m)
+    over(col * m, m)
+
+    out = np.concatenate([rgb, alpha], axis=-1)
     return TextSprite(
         arr=out,
         ox=ox,
@@ -327,6 +367,7 @@ class CaptionLayer:
         bright_background: bool = False,
         bg_luma_times: list[float] | None = None,
         bg_luma_values: list[float] | None = None,
+        bg_rgb_values: list[tuple[int, int, int]] | None = None,
         caption_style: str = "classic",
         caption_position: str = "head",
     ) -> None:
@@ -344,6 +385,12 @@ class CaptionLayer:
         self.shadow = 1.4 if bright_background else 1.0
         self._luma_times = np.asarray(bg_luma_times, np.float32) if bg_luma_times else None
         self._luma_values = np.asarray(bg_luma_values, np.float32) if bg_luma_values else None
+        self._rgb_values = (
+            np.asarray(bg_rgb_values, np.float32)
+            if bg_rgb_values and len(bg_rgb_values) == len(bg_luma_times or [])
+            else None
+        )
+        self._fx: dict = {}
         self.captions: list[Caption] = sorted(timeline.captions, key=lambda c: c.start)
         self.caption_position = caption_position
         u = self.u
@@ -357,11 +404,14 @@ class CaptionLayer:
             bottom = min(height, baseline + int(190 * u))
         else:
             head = head_top if head_top else int(height * 0.30)
-            baseline = head - int(165 * u)
+            # The LAST line of a caption sits `gap` above the hairline (a
+            # multi-line block grows upward from it), so type never crowds
+            # the head even when the speaker leans in.
+            baseline = head - int(190 * u)
             baseline = max(int(height * 0.12), min(baseline, int(height * 0.25)))
-            baseline = max(baseline, int(250 * u))
-            top = max(0, baseline - int(250 * u))
-            bottom = min(height, baseline + int(190 * u))
+            baseline = max(baseline, int(260 * u))
+            top = max(0, baseline - int(310 * u))
+            bottom = min(height, baseline + int(150 * u))
 
         # Premium theme only: an occasional line sits below the face — on the
         # chest/upper-torso area — instead of always above the head, so a
@@ -509,6 +559,12 @@ class CaptionLayer:
             w = max(2, int(round(full * eased)))
             x0 = (full - w) // 2
             return _blend(canvas, el.arr[:, x0 : x0 + w], el.x + x0, el.y, e)
+        if el.mode == "drift":
+            # A bubble: floats up `rise` px over its life, fading in then out.
+            assert el.arr is not None
+            dy = -int(round(el.rise * p))
+            a = min(1.0, p / 0.18) * min(1.0, (1.0 - p) / 0.45)
+            return _blend(canvas, el.arr, el.x, el.y + dy, max(0.0, a) * e)
         if el.mode == "frames":
             idx = min(len(el.frames) - 1, int(p * (len(el.frames) - 1) + 0.5))
             arr = el.frames[idx]
@@ -520,31 +576,78 @@ class CaptionLayer:
         self._uid += 1
         return Element(uid=self._uid, **kwargs)
 
-    def _is_bright(self, cap: Caption) -> bool:
-        """Real background intelligence: the mean luminance of the video
-        under THIS caption's own on-screen window, not a single guess for
-        the whole reel — a talking head walking from shade into open sky
-        needs white text in one and dark ink in the other."""
+    def _bg_sample(self, cap: Caption) -> tuple[float | None, tuple[int, int, int] | None]:
+        """Mean (luma, rgb) of the caption band under THIS caption's own
+        on-screen window — a talking head walking from shade into open sky
+        needs different treatment in each, so no single guess per reel."""
         if self._luma_times is None or self._luma_values is None or len(self._luma_times) == 0:
-            return self._default_bright
+            return None, None
         mask = (self._luma_times >= cap.start) & (self._luma_times <= cap.end)
         if not mask.any():
             idx = int(np.argmin(np.abs(self._luma_times - cap.start)))
-            sample = float(self._luma_values[idx])
+            idxs = np.array([idx])
         else:
-            sample = float(self._luma_values[mask].mean())
-        return sample > BRIGHT_LUMA_THRESHOLD
+            idxs = np.nonzero(mask)[0]
+        luma = float(self._luma_values[idxs].mean())
+        rgb = None
+        if self._rgb_values is not None:
+            mean = self._rgb_values[idxs].mean(axis=0)
+            rgb = (int(mean[0]), int(mean[1]), int(mean[2]))
+        return luma, rgb
 
-    def _palette_for(self, bright: bool) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
-        """(body, accent, hairline) — the dark set on a bright wall or sky,
-        the usual cream-and-white set otherwise. Editorial swaps the accent
-        for its clean light-green family; body text stays plain white/ink."""
+    def _is_bright(self, cap: Caption) -> bool:
+        luma, _ = self._bg_sample(cap)
+        if luma is None:
+            return self._default_bright
+        return luma > BRIGHT_LUMA_THRESHOLD
+
+    def _palette_for(
+        self, bright: bool, rgb: tuple[int, int, int] | None = None
+    ) -> tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]]:
+        """(body, accent, hairline), and sets `self._fx` — the halo recipe
+        (tinted shade, outline, glow) every word sprite is built with.
+
+        Nothing here is ever black: text stays light and the contrast comes
+        from a deep shade of the WALL's own hue (outline + soft shadow) on a
+        bright background, or a soft pastel glow of that hue on a dark one,
+        so the captions read as part of the picture instead of a sticker."""
+        import colorsys
+
+        u = self.u
+        if rgb is not None:
+            h, sat, _val = colorsys.rgb_to_hsv(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255)
+            if sat < 0.08:
+                h, sat = 0.60, 0.0  # neutral wall -> a deep blue-slate halo
+        else:
+            h, sat = 0.60, 0.0
+
+        def hsv(hh: float, ss: float, vv: float) -> tuple[int, int, int]:
+            r, g, b = colorsys.hsv_to_rgb(hh % 1.0, min(max(ss, 0.0), 1.0), min(max(vv, 0.0), 1.0))
+            return int(r * 255), int(g * 255), int(b * 255)
+
+        gold = (255, 214, 110)
         if self.caption_style == "editorial":
-            accent = EDITORIAL_GREEN_BRIGHT if bright else EDITORIAL_GREEN
-            return (BRIGHT_INK if bright else WHITE), accent, accent
+            accent_dark = accent_bright = EDITORIAL_GREEN
+        else:
+            accent_dark, accent_bright = CREAM, gold
         if bright:
-            return BRIGHT_INK, BRIGHT_GOLD, BRIGHT_HAIRLINE
-        return WHITE, CREAM, HAIRLINE
+            deep = hsv(h, 0.55 + 0.35 * sat, 0.34)
+            self._fx = {
+                "shade": hsv(h, 0.6 + 0.3 * sat, 0.20),
+                "outline": deep,
+                "outline_px": max(2, int(round(3.4 * u))),
+                "glow": None,
+                "glow_strength": 0.0,
+            }
+            return WHITE, accent_bright, deep
+        self._fx = {
+            "shade": hsv(h, 0.55, 0.10),
+            "outline": None,
+            "outline_px": 0,
+            "glow": hsv(h, 0.38 + 0.25 * sat, 1.0) if rgb is not None else None,
+            "glow_strength": 0.55,
+        }
+        return WHITE, accent_dark, HAIRLINE
 
     def _tokens(
         self,
@@ -608,6 +711,7 @@ class CaptionLayer:
 
     def _build_line(self, tokens: list[_Token], scale: float) -> tuple[list[TextSprite], list[float], float]:
         u = self.u
+        fx = self._fx
         sprites = [
             text_sprite(
                 tok.text,
@@ -617,6 +721,17 @@ class CaptionLayer:
                 shadow=self.shadow if tok.shadow else 0.0,
                 # Playfair hairlines break up under video compression.
                 stroke=1 if tok.font_path in (SERIF_FONT, SERIF_ITALIC_FONT) and u >= 0.9 else 0,
+                **(
+                    {
+                        "shade": fx["shade"],
+                        "outline": fx["outline"],
+                        "outline_px": fx["outline_px"],
+                        "glow": fx["glow"],
+                        "glow_strength": fx["glow_strength"],
+                    }
+                    if tok.shadow and fx
+                    else {}
+                ),
             )
             for tok in tokens
         ]
@@ -640,9 +755,10 @@ class CaptionLayer:
         # set instead of the usual white/cream — same shadow logic, inverted
         # so the halo still reads as contrast rather than a glow that blends
         # straight into the background.
+        luma, rgb = self._bg_sample(cap)
         bright = self._is_bright(cap)
-        self.shadow = 1.4 if bright else 1.0
-        palette = self._palette_for(bright)
+        self.shadow = 1.25 if bright else 1.0
+        palette = self._palette_for(bright, rgb)
         lines = self._tokens(cap, index, palette)
         max_w = self.width * MAX_LINE_FRAC
         if treatment in {"tape", "chip", "bubble"}:
@@ -650,6 +766,10 @@ class CaptionLayer:
         elements: list[Element] = []
         use_chest = cap.screen_area == "chest" and self.baseline_chest is not None
         baseline = float(self.baseline_chest if use_chest else self.baseline)
+        # The LAST line sits on the anchor and earlier lines stack above it,
+        # so a two-line caption never drops toward the speaker's head.
+        baseline -= self._block_drop(lines, max_w)
+        hook_caption = self._is_hook_caption(cap, index)
         line_meta: list[tuple[float, float, float, float, float]] = []  # x0, x1, ink_top, ink_bottom, size
         prev_size = 0.0
         # Editorial theme: (t_in, cursor_x, cursor_y, color, font_path, size_px)
@@ -698,7 +818,9 @@ class CaptionLayer:
                     typewriter_marks.append(
                         (t_in, x_left + dx + sp.advance, baseline, tok.color, tok.font_path, tok.size * scale)
                     )
-                if pop_line and (whole_line or tok.word.emphasis):
+                if (pop_line and (whole_line or tok.word.emphasis)) or (
+                    hook_caption and not typewriter
+                ):
                     cx = x_left + dx - sp.ox + sp.arr.shape[1] / 2
                     cy = baseline - sp.oy + sp.arr.shape[0] / 2
                     elements.append(
@@ -747,7 +869,113 @@ class CaptionLayer:
             elements[:0] = self._bubble(cap, first)
         if cap.icon and cap.icon != "none":
             elements[:0] = self._icon_badge(cap, first, cap.icon)
+        if hook_caption:
+            elements.extend(self._hook_flourish(cap, index, line_meta, palette))
         return elements
+
+    # ------------------------------------------------------------ hook fx
+    def _is_hook_caption(self, cap: Caption, index: int) -> bool:
+        """The first one or two spoken lines — the part that decides whether
+        someone keeps watching — get extra motion: every word pops in, and a
+        few stars and bubbles play around the text."""
+        return index <= 1 and cap.start < 6.0
+
+    def _block_drop(self, lines: list[list[_Token]], max_w: float) -> float:
+        u = self.u
+        drop = 0.0
+        prev = 0.0
+        for li, tokens in enumerate(lines):
+            if not tokens:
+                continue
+            fonts = [_font(t.font_path, round(t.size * u)) for t in tokens]
+            width = 0.0
+            for i, (t, f) in enumerate(zip(tokens, fonts)):
+                if i > 0:
+                    width += min(fonts[i - 1].getlength(" "), f.getlength(" ")) * 1.02
+                width += f.getlength(t.text)
+            scale = 1.0 if width <= max_w else max(0.55, max_w / width)
+            size = max(t.size for t in tokens) * u * scale
+            if li > 0:
+                drop += 1.10 * size + 0.55 * prev
+            prev = size
+        return drop
+
+    def _bubble_sprite(self, radius: int, tint: tuple[int, int, int]) -> np.ndarray:
+        """A soap-bubble: thin bright rim, faint body, a small highlight."""
+        ss = 4
+        pad = 3
+        D = (2 * radius + 2 * pad)
+        img = Image.new("L", (D * ss, D * ss), 0)
+        d = ImageDraw.Draw(img)
+        c = D * ss / 2
+        r = radius * ss
+        d.ellipse([c - r, c - r, c + r, c + r], fill=60)
+        d.ellipse([c - r, c - r, c + r, c + r], outline=255, width=max(2, int(1.8 * ss)))
+        hi = Image.new("L", (D * ss, D * ss), 0)
+        ImageDraw.Draw(hi).ellipse(
+            [c - r * 0.58, c - r * 0.62, c - r * 0.18, c - r * 0.30], fill=235
+        )
+        base = np.asarray(img.resize((D, D), Image.LANCZOS), np.float32) / 255.0
+        high = np.asarray(hi.resize((D, D), Image.LANCZOS), np.float32) / 255.0
+        a = np.clip(base * 0.8 + high * 0.9, 0.0, 1.0)
+        col = np.array(tint, np.float32) / 255.0
+        out = np.zeros((D, D, 4), np.float32)
+        out[..., :3] = col * a[..., None]
+        out[..., 3] = a
+        return out
+
+    def _hook_flourish(self, cap: Caption, index: int, line_meta, palette) -> list[Element]:
+        """Stars that pop and bubbles that float up around the opening
+        lines. Deterministic per caption; sparse enough to read as sparkle,
+        not clutter."""
+        u = self.u
+        if not line_meta:
+            return []
+        rng = random.Random(9100 + index)
+        x0 = min(m[0] for m in line_meta)
+        x1 = max(m[1] for m in line_meta)
+        top = min(m[2] for m in line_meta)
+        bottom = max(m[3] for m in line_meta)
+        body, accent, _hair = palette
+        glow = self._fx.get("glow") if self._fx else None
+        star_cols = [accent, WHITE, accent, WHITE, accent]
+        els: list[Element] = []
+        for k in range(5):
+            if k % 3 == 0:
+                sx = x0 - rng.uniform(26, 62) * u
+                sy = rng.uniform(top, bottom)
+            elif k % 3 == 1:
+                sx = x1 + rng.uniform(26, 62) * u
+                sy = rng.uniform(top, bottom)
+            else:
+                sx = rng.uniform(x0, x1)
+                sy = top - rng.uniform(26, 78) * u
+            sx = min(max(sx, 64 * u), self.width - 64 * u)
+            size = max(8, int(rng.uniform(15, 27) * u))
+            star = _astroid(size, star_cols[k], glow=True)
+            frames = [_scaled(star, s) for s in (0.2, 0.55, 0.95, 1.3, 1.1, 1.0)]
+            els.append(
+                self._element(
+                    t_in=cap.start + 0.10 + 0.09 * k, dur=0.34, t_out=cap.end,
+                    mode="frames", frames=frames, x=int(sx), y=int(sy),
+                )
+            )
+        tint = (232, 244, 255) if glow is None else tuple(min(255, int(c * 0.55 + 255 * 0.45)) for c in glow)
+        for k in range(6):
+            radius = max(6, int(rng.uniform(8, 19) * u))
+            arr = self._bubble_sprite(radius, tint)
+            h, w = arr.shape[:2]
+            bx = min(max(rng.uniform(x0 - 18 * u, x1 + 18 * u), 64 * u), self.width - 64 * u) - w / 2
+            by = top - rng.uniform(0, 26) * u - h / 2
+            life = min(max(cap.end - cap.start, 0.7), 1.5)
+            els.append(
+                self._element(
+                    t_in=cap.start + 0.05 + 0.10 * k, dur=life, t_out=cap.end,
+                    mode="drift", arr=arr, x=int(bx), y=int(by),
+                    rise=rng.uniform(70, 130) * u,
+                )
+            )
+        return els
 
     def _typewriter_cursor(
         self,
@@ -768,7 +996,13 @@ class CaptionLayer:
             t_end = min(t_next, t_in + CURSOR_MAX_S, cap.end)
             if t_end <= t_in:
                 continue
-            sp = text_sprite("|", _font(font_path, round(size_px * u)), color, u=u, shadow=self.shadow)
+            fx = self._fx or {}
+            sp = text_sprite(
+                "|", _font(font_path, round(size_px * u)), color, u=u, shadow=self.shadow,
+                shade=fx.get("shade", (0, 0, 0)), outline=fx.get("outline"),
+                outline_px=fx.get("outline_px", 0), glow=fx.get("glow"),
+                glow_strength=fx.get("glow_strength", 0.0),
+            )
             x = int(round(cx + CURSOR_GAP * u - sp.ox))
             y = int(round(cy - sp.oy))
             t = t_in

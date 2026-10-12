@@ -132,10 +132,14 @@ circular badges beside the line that's unmistakably about one of those. At most 
 every ~13 seconds, and never doubled up with a `chip` line (the pill is already the
 "notice this" signal).
 
-**Adaptive color.** Every caption independently reads the real video luminance under
-its own time window (one cheap low-res decode of the whole reel, not a single guess)
-and picks white/cream or dark-ink/deep-gold accordingly — so a hook shot in open sky
-and a mid-roll shot in a dim room both stay fully legible, in the same render.
+**Adaptive color.** Every caption independently reads the real color of the video
+under its own time window (one cheap low-res decode of the whole reel) and derives its
+look from the wall itself: text stays light, and the contrast comes from a deep shade of
+the wall's own hue (outline + soft shadow) on a bright background, or a soft pastel glow
+of that hue on a dark one — never flat black ink. Captions anchor to the *highest* head
+position seen, with the last line of a block sitting on that gap and earlier lines
+stacking upward, so type never crowds the speaker. The first one or two spoken lines also
+get extra motion: every word pops in, with stars and floating bubbles around the text.
 
 <p align="center">
   <img src="docs/samples/theme-paper.jpg" width="140" alt="Warm palette on a plain background">
