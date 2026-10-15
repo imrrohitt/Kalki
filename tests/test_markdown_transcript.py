@@ -4,9 +4,18 @@ from app.transcription.markdown import parse_timestamped_markdown, transcript_fr
 
 
 def test_parse_timestamped_english_markdown():
-    text = Path(
-        "storage/jobs/11e1945a-8e3d-4faf-a33c-48420d670bfe/transcription.md"
-    ).read_text(encoding="utf-8")
+    text = "\n\n".join(
+        f"**{a} - {b}**\n\n{line}"
+        for a, b, line in [
+            ("00:00", "00:15", "Hi, today I want to talk about how I use RAG in real projects."),
+            ("00:15", "00:30", "First, I set up the retriever with Cursor and Claude."),
+            ("00:30", "00:50", "Then I chunk the documents carefully so context is preserved."),
+            ("00:50", "01:10", "Next comes the embedding step, which decides recall quality."),
+            ("01:10", "01:25", "After that I evaluate answers against a small test set."),
+            ("01:25", "01:45", "Finally I ship it behind a cache to keep latency low."),
+            ("01:45", "01:59", "That is the whole flow, thank you for watching."),
+        ]
+    )
     transcript = parse_timestamped_markdown(text, duration=119.8)
     assert transcript.language == "en"
     assert len(transcript.segments) == 7

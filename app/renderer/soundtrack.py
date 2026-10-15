@@ -270,7 +270,7 @@ def plan_accents(
             kind, gain, reason = "shimmer", 0.10, "mood-pop"
         hits.append(SfxHit(at=round(at, 3), kind=kind, gain=gain, reason=reason))
         last_at = at
-    return hits[:10]
+    return hits[: max(10, int(video_duration // 25))]
 
 
 def build_soundtrack(

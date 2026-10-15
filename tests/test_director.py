@@ -276,3 +276,74 @@ def test_director_runs_brief_script_review_annotate():
     assert caps[0].treatment in {"serif", "stack"}
     assert caps[-1].end <= 4.0
     assert len(completions.calls) == 4
+
+
+def test_long_video_is_windowed_not_sent_as_one_call():
+    """A 16-minute upload must not go through brief/review/annotate as a
+    single LLM call each — those passes run on windows and are stitched back
+    together, with every line still carrying its own annotation."""
+    n_segments = 160  # 6s each -> 16 minutes
+    segs, step = [], 1.0
+    for s in range(n_segments):
+        t0 = s * 6.0
+        ws = [
+            Word(word=f"word{s}x{k}", start=t0 + k * step, end=t0 + k * step + 0.8)
+            for k in range(5)
+        ]
+        segs.append(Segment(start=t0, end=t0 + 5.0, text=" ".join(w.word for w in ws), words=ws))
+    transcript = Transcript(language="en", spoken_language="en", segments=segs)
+    counts = {"brief": 0, "script": 0, "review": 0, "annotate": 0}
+
+    def user(kwargs):
+        return json.loads(kwargs["messages"][1]["content"])
+
+    def brief(kwargs):
+        counts["brief"] += 1
+        got = user(kwargs)["segments"]
+        return {
+            "topic": "long talk",
+            "music_mood": "warm_inspiring",
+            "hook": "word0x0",
+            "segments": [{"id": g["id"], "text": g["text"]} for g in got],
+        }
+
+    def script(kwargs):
+        counts["script"] += 1
+        return {
+            "segments": [
+                {"id": g["id"], "lines": [g["text"]]} for g in user(kwargs)["segments"]
+            ]
+        }
+
+    def review(kwargs):
+        counts["review"] += 1
+        return {"edits": [], "notes": "ok"}
+
+    def annotate(kwargs):
+        counts["annotate"] += 1
+        return {
+            "lines": [
+                {"i": g["i"], "key": "", "weight": 1, "kind": "normal", "mood": "neutral", "icon": "none"}
+                for g in user(kwargs)["lines"]
+            ]
+        }
+
+    completions = _FakeCompletions(
+        [
+            ("story editor", brief),
+            ("caption lines", script),
+            ("copy reviewer", review),
+            ("art director", annotate),
+        ]
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    result = asyncio.run(
+        CaptionDirector(client=client, model="fake").direct(
+            transcript, video_duration=n_segments * 6.0
+        )
+    )
+    assert counts["brief"] >= 4  # 960s / 240s windows
+    assert counts["review"] >= 2 and counts["annotate"] >= 2
+    assert len(result.notes) == n_segments  # one annotation per line, all windows
+    assert result.timeline.captions
+    assert result.timeline.captions[-1].end <= n_segments * 6.0

@@ -350,6 +350,13 @@ The values that change the output. Full list in [`.env.example`](.env.example).
 | `MAX_VIDEO_DURATION_SEC` | `0` | `0` = no upload cap. |
 | `STORAGE_DIR` | `storage` | Uploads, jobs, and rendered output. |
 
+**Long videos.** There is no length cap by default (`MAX_VIDEO_DURATION_SEC=0`), so a
+15-20 minute upload is accepted. Past ~5.5 minutes the director's brief, review and
+annotate passes run on windows (4 min / 120 lines / 100 lines) three at a time and are
+stitched back together — a window that fails falls back to heuristics instead of failing
+the whole reel. The background-color pass reads keyframes only and its timeout scales
+with the length. Budget roughly 0.8x real time to render a 60 fps phone clip.
+
 The director runs *thinking* only for the brief pass; script/review/annotate run
 without it — thinking adds minutes per call for no quality gain on those.
 

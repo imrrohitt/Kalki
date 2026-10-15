@@ -236,13 +236,20 @@ class FFmpegRenderer:
         y0 = min(small_h - 1, int(top * small_h / height))
         y1 = max(y0 + 1, int(bottom * small_h / height))
         band_h = y1 - y0
+        # A long upload would take minutes to decode frame by frame just to
+        # take two samples a second — read keyframes only past 3 minutes (the
+        # fps filter resamples by timestamp), and scale the timeout with the
+        # length so the track is never silently dropped.
+        pre = ["-skip_frame", "nokey"] if duration > 180 else []
         cmd = [
-            settings.ffmpeg_path, "-v", "error", "-i", source_video,
+            settings.ffmpeg_path, "-v", "error", *pre, "-i", source_video,
             "-vf", f"fps={sample_fps},scale={small_w}:{small_h},crop={small_w}:{band_h}:0:{y0},format=rgb24",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
         ]
         try:
-            raw = subprocess.run(cmd, capture_output=True, timeout=60).stdout
+            raw = subprocess.run(
+                cmd, capture_output=True, timeout=max(60.0, duration * 0.5 + 60.0)
+            ).stdout
         except subprocess.TimeoutExpired:
             return [], [], []
         frame_size = small_w * band_h * 3

@@ -53,6 +53,14 @@ from app.transcription.models import Transcript, Word
 logger = logging.getLogger(__name__)
 
 CHUNK_SECONDS = 25.0
+# Long-form handling: a 15-20 minute upload is far too big for one brief /
+# review / annotate call (output limits, timeouts), so past these sizes each
+# pass runs on windows concurrently and the results are stitched back together.
+LONG_SECONDS = 330.0
+BRIEF_WINDOW_SECONDS = 240.0
+REVIEW_WINDOW_LINES = 120
+ANNOTATE_WINDOW_LINES = 100
+WINDOW_CONCURRENCY = 3
 MAX_SCREEN_WORDS = 5
 SECONDS_PER_CAPTION = 1.45
 
@@ -519,10 +527,16 @@ class CaptionDirector:
         raise RuntimeError(f"director {label} failed: {last_error}")
 
     # ------------------------------------------------------------------ brief
-    async def brief(self, transcript: Transcript, *, reference_text: str = "") -> ReelBrief:
+    async def _brief_window(
+        self, transcript: Transcript, seg_ids: list[int], reference_text: str
+    ) -> dict[str, Any]:
         segments = [
-            {"id": i, "start": round(s.start, 1), "text": stabilize_copy(s.text)}
-            for i, s in enumerate(transcript.segments)
+            {
+                "id": i,
+                "start": round(transcript.segments[i].start, 1),
+                "text": stabilize_copy(transcript.segments[i].text),
+            }
+            for i in seg_ids
         ]
         payload: dict[str, Any] = {
             "spoken_language": transcript.spoken_language or transcript.language,
@@ -540,13 +554,46 @@ class CaptionDirector:
                 )
             return None
 
-        data = await self._ask(BRIEF_SYSTEM, payload, label="brief", think=True, validate=validate)
+        label = "brief" if len(seg_ids) == len(transcript.segments) else f"brief[s{seg_ids[0]}-s{seg_ids[-1]}]"
+        return await self._ask(BRIEF_SYSTEM, payload, label=label, think=True, validate=validate)
+
+    async def brief(self, transcript: Transcript, *, reference_text: str = "") -> ReelBrief:
+        n = len(transcript.segments)
+        span = transcript.segments[-1].end - transcript.segments[0].start if n else 0.0
+        if span <= LONG_SECONDS:
+            windows = [list(range(n))]
+        else:
+            windows = chunk_segments(transcript, BRIEF_WINDOW_SECONDS)
+        sem = asyncio.Semaphore(WINDOW_CONCURRENCY)
+
+        async def run(ids: list[int]) -> dict[str, Any]:
+            async with sem:
+                return await self._brief_window(transcript, ids, reference_text)
+
+        results = await asyncio.gather(*[run(ids) for ids in windows])
+        # The opening window carries the reel-level read (topic, hook, mood);
+        # later windows only contribute corrections, terms and key ideas.
+        data = results[0]
         by_id: dict[int, str] = {}
-        for item in data.get("segments") or []:
-            try:
-                by_id[int(item.get("id"))] = str(item.get("text") or "").strip()
-            except (TypeError, ValueError, AttributeError):
-                continue
+        glossary: list[dict[str, str]] = []
+        seen_terms: set[tuple[str, str]] = set()
+        key_ideas: list[str] = []
+        for part in results:
+            for item in part.get("segments") or []:
+                try:
+                    by_id[int(item.get("id"))] = str(item.get("text") or "").strip()
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            for g in part.get("glossary") or []:
+                if not isinstance(g, dict):
+                    continue
+                term = (str(g.get("heard", "")), str(g.get("correct", "")))
+                if term not in seen_terms:
+                    seen_terms.add(term)
+                    glossary.append({"heard": term[0], "correct": term[1]})
+            for idea in part.get("key_ideas") or []:
+                if str(idea).strip() and str(idea) not in key_ideas:
+                    key_ideas.append(str(idea))
         mood = str(data.get("music_mood") or "").strip()
         return ReelBrief(
             topic=str(data.get("topic") or ""),
@@ -555,12 +602,8 @@ class CaptionDirector:
             tone=str(data.get("tone") or "warm"),
             music_mood=mood if mood in MUSIC_MOODS else "warm_inspiring",
             hook=str(data.get("hook") or ""),
-            key_ideas=[str(x) for x in (data.get("key_ideas") or []) if str(x).strip()][:8],
-            glossary=[
-                {"heard": str(g.get("heard", "")), "correct": str(g.get("correct", ""))}
-                for g in (data.get("glossary") or [])
-                if isinstance(g, dict)
-            ][:30],
+            key_ideas=key_ideas[:8],
+            glossary=glossary[:30],
             segments=[by_id.get(i) or stabilize_copy(s.text) for i, s in enumerate(transcript.segments)],
         )
 
@@ -601,36 +644,68 @@ class CaptionDirector:
 
     # ----------------------------------------------------------------- review
     async def review(
-        self, drafts: list[CaptionDraft], words: list[Word], brief: ReelBrief
+        self,
+        drafts: list[CaptionDraft],
+        words: list[Word],
+        brief: ReelBrief,
+        word_seg: list[int] | None = None,
     ) -> tuple[list[CaptionDraft], str]:
         lines = [d.text for d in drafts]
-        payload = {
-            "brief": {"topic": brief.topic, "glossary": brief.glossary},
-            "corrected_transcript": " ".join(brief.segments),
-            "lines": [
-                {"i": i, "t": round(words[d.first].start, 1), "text": d.text}
-                for i, d in enumerate(drafts)
-            ],
-        }
-        data = await self._ask(REVIEW_SYSTEM, payload, label="review", attempts=2)
+        n = len(drafts)
+        if n <= REVIEW_WINDOW_LINES or not word_seg:
+            spans = [(0, n)]
+        else:
+            spans = [(lo, min(n, lo + REVIEW_WINDOW_LINES)) for lo in range(0, n, REVIEW_WINDOW_LINES)]
+        sem = asyncio.Semaphore(WINDOW_CONCURRENCY)
+
+        async def run(lo: int, hi: int) -> dict[str, Any] | None:
+            if len(spans) == 1:
+                corrected = " ".join(brief.segments)
+            else:
+                first_seg = max(0, word_seg[drafts[lo].first] - 1)
+                last_seg = min(len(brief.segments) - 1, word_seg[drafts[hi - 1].last] + 1)
+                corrected = " ".join(brief.segments[first_seg : last_seg + 1])
+            payload = {
+                "brief": {"topic": brief.topic, "glossary": brief.glossary},
+                "corrected_transcript": corrected,
+                "lines": [
+                    {"i": i, "t": round(words[drafts[i].first].start, 1), "text": drafts[i].text}
+                    for i in range(lo, hi)
+                ],
+            }
+            async with sem:
+                try:
+                    return await self._ask(REVIEW_SYSTEM, payload, label=f"review[{lo}-{hi}]", attempts=2)
+                except Exception as exc:  # noqa: BLE001 - one bad window shouldn't sink the pass
+                    if len(spans) == 1:
+                        raise
+                    logger.warning("director review window %s-%s skipped: %s", lo, hi, exc)
+                    return None
+
         out = list(drafts)
         changed = 0
-        for edit in data.get("edits") or []:
-            try:
-                i = int(edit.get("i"))
-            except (TypeError, ValueError, AttributeError):
+        notes: list[str] = []
+        for (lo, hi), data in zip(spans, await asyncio.gather(*[run(lo, hi) for lo, hi in spans])):
+            if not data:
                 continue
-            if not 0 <= i < len(out):
-                continue
-            after = str(edit.get("text") or "").strip()
-            if _edit_is_safe(out[i].text, after, lines, i):
-                out[i] = replace(out[i], text=after)
-                changed += 1
-        return out, f"{changed} copy edits. {data.get('notes') or ''}".strip()
+            if data.get("notes") and len(notes) < 3:
+                notes.append(str(data.get("notes")))
+            for edit in data.get("edits") or []:
+                try:
+                    i = int(edit.get("i"))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if not lo <= i < hi:
+                    continue
+                after = str(edit.get("text") or "").strip()
+                if _edit_is_safe(out[i].text, after, lines, i):
+                    out[i] = replace(out[i], text=after)
+                    changed += 1
+        return out, f"{changed} copy edits. {' '.join(notes)}".strip()
 
     # --------------------------------------------------------------- annotate
-    async def annotate(
-        self, drafts: list[CaptionDraft], words: list[Word], brief: ReelBrief
+    async def _annotate_window(
+        self, drafts: list[CaptionDraft], words: list[Word], brief: ReelBrief, label: str
     ) -> list[LineNote]:
         lines = [d.text for d in drafts]
         payload = {
@@ -643,7 +718,7 @@ class CaptionDirector:
         data = await self._ask(
             ANNOTATE_SYSTEM,
             payload,
-            label="annotate",
+            label=label,
             max_tokens=12000,
             validate=lambda d: annotation_problems(d, lines),
         )
@@ -663,6 +738,31 @@ class CaptionDirector:
                 icon=icon if icon in ICONS else "none",
                 cta=bool(item.get("cta")),
             )
+        return notes
+
+    async def annotate(
+        self, drafts: list[CaptionDraft], words: list[Word], brief: ReelBrief
+    ) -> list[LineNote]:
+        n = len(drafts)
+        if n <= ANNOTATE_WINDOW_LINES:
+            notes = await self._annotate_window(drafts, words, brief, "annotate")
+        else:
+            spans = [(lo, min(n, lo + ANNOTATE_WINDOW_LINES)) for lo in range(0, n, ANNOTATE_WINDOW_LINES)]
+            sem = asyncio.Semaphore(WINDOW_CONCURRENCY)
+
+            async def run(lo: int, hi: int) -> list[LineNote]:
+                async with sem:
+                    try:
+                        return await self._annotate_window(
+                            drafts[lo:hi], words, brief, f"annotate[{lo}-{hi}]"
+                        )
+                    except Exception as exc:  # noqa: BLE001 - heuristics cover a failed window
+                        logger.warning("director annotate window %s-%s failed: %s", lo, hi, exc)
+                        return [LineNote() for _ in range(hi - lo)]
+
+            notes = []
+            for part in await asyncio.gather(*[run(lo, hi) for lo, hi in spans]):
+                notes.extend(part)
         moody = sum(1 for note in notes if note.mood != "neutral")
         iconed = sum(1 for note in notes if note.icon != "none")
         cta_n = sum(1 for note in notes if note.cta)
@@ -738,7 +838,11 @@ class CaptionDirector:
         notes = ""
         t2 = time.perf_counter()
         try:
-            drafts, notes = await self.review(drafts, words, brief)
+            word_seg = [0] * len(words)
+            for sid, (lo, hi) in enumerate(seg_ranges):
+                for wi in range(lo, hi):
+                    word_seg[wi] = sid
+            drafts, notes = await self.review(drafts, words, brief, word_seg)
             logger.info("[%s] director review: %s", jid, notes)
         except Exception as exc:  # noqa: BLE001 - review is an improvement pass
             logger.warning("[%s] director review skipped: %s", jid, exc)
